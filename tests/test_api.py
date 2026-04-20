@@ -137,3 +137,44 @@ def test_wechat_tag_operations_in_openapi():
     assert any(o.startswith("draft_") for o in wechat_ops)
     assert any(o.startswith("material_") for o in wechat_ops)
     assert any(o.startswith("message_") for o in wechat_ops)
+
+
+def test_mcp_whitelist_draft_and_material_only():
+    """MCP must expose ONLY draft + material + healthz; publish/message are HTTP-only.
+
+    This is the guard for the 'compose drafts; I'll publish by hand' workflow.
+    """
+    from main import MCP_TOOLS
+
+    assert set(MCP_TOOLS) == {
+        "healthz",
+        "draft_add",
+        "draft_update",
+        "draft_get",
+        "draft_batchget",
+        "draft_count",
+        "draft_delete",
+        "draft_switch",
+        "draft_product_cardinfo",
+        "material_get",
+        "material_count",
+        "material_batchget",
+        "material_delete",
+        "material_uploadimg",
+        "material_add",
+        "material_temp_upload",
+        "material_temp_get",
+        "material_temp_get_jssdk",
+    }
+    # Explicitly must-NOT-be-there: publish + message.
+    assert not any(t.startswith("freepublish_") for t in MCP_TOOLS)
+    assert not any(t.startswith("message_") for t in MCP_TOOLS)
+    # HTTP routes for the excluded groups still exist (agent can't reach them,
+    # but humans using /docs or curl can).
+    http_ops = {
+        op.get("operationId")
+        for path_item in app.openapi()["paths"].values()
+        for op in path_item.values()
+    }
+    assert "freepublish_submit" in http_ops
+    assert "message_mass_sendall" in http_ops

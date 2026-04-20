@@ -3,9 +3,9 @@
 微信公众号（订阅号 / 服务号）服务端 API 的 FastAPI 封装，同时通过 MCP 对 AI Agent 暴露。
 Token 自动缓存、鉴权内置、一条 `docker compose up` 即可部署。
 
-- **37 个接口**，覆盖发布端到端：基础接口 6 + 发布能力 5 + 草稿管理 8 + 素材管理 9 + 基础消息 10
+- **37 个 HTTP 接口**，覆盖发布端到端：基础接口 6 + 发布能力 5 + 草稿管理 8 + 素材管理 9 + 基础消息 10
 - **Access Token 自动管理**：asyncio 锁去重 + 文件持久化 + 40001/42001 自动刷新
-- **MCP 原生支持**：所有接口自动暴露为 MCP tools（`/mcp` HTTP endpoint）
+- **MCP 暴露（故意收窄）**：只有 **草稿 + 素材 + healthz 共 18 个** tool 走 MCP；发布、群发、订阅消息等保留为 HTTP-only，避免 Agent 误触发。见 `main.py` 里的 `MCP_TOOLS` 白名单
 - **API Key 鉴权**：保护 `/wechat/*` 与 `/mcp`，可关
 - **63 个测试** 全绿（httpx + respx + pytest-asyncio）
 

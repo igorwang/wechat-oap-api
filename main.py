@@ -94,11 +94,40 @@ app.include_router(material_router.router)
 app.include_router(message_router.router)
 
 
+# MCP exposes a DELIBERATELY NARROW subset — only what's needed to build and
+# inspect drafts + upload the media they reference. Publishing (freepublish_*)
+# and messaging (message_*) stay reachable via the HTTP routes (/docs) but are
+# NOT exposed to agents, to keep the agent-visible tool surface aligned with
+# the intended "compose drafts; I'll publish by hand" workflow.
+MCP_TOOLS = [
+    # sanity-check
+    "healthz",
+    # draft lifecycle
+    "draft_add",
+    "draft_update",
+    "draft_get",
+    "draft_batchget",
+    "draft_count",
+    "draft_delete",
+    "draft_switch",
+    "draft_product_cardinfo",
+    # material (needed to supply thumb_media_id + inline images)
+    "material_get",
+    "material_count",
+    "material_batchget",
+    "material_delete",
+    "material_uploadimg",
+    "material_add",
+    "material_temp_upload",
+    "material_temp_get",
+    "material_temp_get_jssdk",
+]
+
 mcp = FastApiMCP(
     app,
     name="wechat-oap-mcp",
-    description="WeChat 订阅号 服务端 API exposed as MCP tools.",
-    include_tags=["wechat"],
+    description="WeChat 公众号 草稿 & 素材 exposed as MCP tools.",
+    include_operations=MCP_TOOLS,
     # Forward the API key header from incoming MCP requests into internal tool calls
     # so they pass our middleware (otherwise 401 on every tool invocation).
     headers=["authorization", settings.api_key_header.lower()],
