@@ -1,207 +1,141 @@
 ---
 name: wechat-api
-description: Call the local wechat-oap-api FastAPI service to operate a WeChat Official Account — publish articles, manage drafts, upload/list/delete materials (images, video, news), send mass or template/subscribe messages, check quotas, refresh tokens. Use this skill whenever the user asks to do anything on their 公众号 / WeChat Official Account via this project (e.g. "发条图文", "把草稿发出去", "上传一张封面", "群发给粉丝", "查一下素材有多少", "清 token 配额"), or wants to invoke a wechat-oap-api endpoint / MCP tool, even if they don't name the endpoint. Prefer this skill over hand-rolled curl commands against api.weixin.qq.com — the local service handles access_token caching, auth, and schema validation.
+description: Operate a WeChat Official Account (公众号) through the `wechat-oap` MCP server. Use this skill whenever the user wants to publish an article, edit or list drafts, upload a cover / thumbnail / in-body image / video, send a mass message (群发), preview before mass send, send a one-off subscribe / template message, query published articles or materials, check auto-reply rules, or troubleshoot WeChat token / quota / callback issues on their 公众号 — even if they don't name the specific MCP tool. Trigger on phrases like "发图文", "发布草稿", "推送文章", "上传封面", "加素材", "群发", "预览群发", "订阅消息", "模板消息", "查已发表", "清配额", "wechat publish", "mass send". Skip this skill for WeChat Pay, mini-program, WeChat Work, or 视频号 live streaming — those aren't in the MCP surface.
 ---
 
-# wechat-api
+# wechat-api — operate 公众号 via MCP
 
-Drive the **wechat-oap-api** FastAPI service (this repo) to perform WeChat Official Account operations. The service wraps api.weixin.qq.com, caches access_token on disk, and exposes each endpoint both as an HTTP route and as an MCP tool.
+This skill uses the **`wechat-oap` MCP server** exposed by the sibling FastAPI project. Every WeChat operation is a single MCP tool call; the server handles access_token caching, concurrency-safe refresh on 40001/42001, and auth. You only orchestrate tools and interpret WeChat's response envelopes.
 
-## When to use
+## 前置条件
 
-Trigger on any request to operate on a WeChat Official Account through this project. Representative phrasings:
+The user must have the `wechat-oap` MCP server registered in Claude Code (via the project's `.mcp.json`, `~/.claude.json`, or `claude mcp add`). Before doing real work, sanity-check availability by calling **`healthz`** or listing one cheap read (e.g. `material_count`). If the tool isn't discoverable or returns a connection error, stop and tell the user to start the service (`docker compose up -d` in the repo) and approve the project MCP — don't try to work around it.
 
-- "发一篇图文 / 推送文章 / 发布草稿" → draft + freepublish
-- "上传封面图 / 加个永久素材 / 删素材" → material
-- "群发 / 预览群发 / 查群发状态 / 设置群发速度" → message/mass
-- "发订阅通知 / 模板消息" → message/subscribe
-- "查 access_token / 清配额 / 校验回调" → /wechat/token, /wechat/clear-quota, /wechat/callback/check
+## Tool catalog (operation_id = MCP tool name)
 
-If the user just wants to read the microservice's own docs or source, don't use this skill — open the files directly.
+37 tools total. Grouped by intent:
 
-## How to call the service
+### 发布 (publish existing drafts)
+- `freepublish_submit(media_id)` → `{publish_id}`
+- `freepublish_get(publish_id)` → `{publish_status, article_id?, ...}`
+- `freepublish_getarticle(article_id)` → 已发布图文详情
+- `freepublish_batchget(offset, count, no_content?)` → 已发布列表
+- `freepublish_delete(article_id, index=0)`
 
-### Base URL
+### 草稿 (the working copy of articles)
+- `draft_add(articles=[Article, ...])` → `{media_id}`
+- `draft_update(media_id, index, articles=Article)`
+- `draft_get(media_id)` / `draft_batchget(offset, count, no_content?)` / `draft_count()` / `draft_delete(media_id)`
+- `draft_switch(checkonly=1)` — 1 = 查状态，0 = 正式开启（开启不可关）
+- `draft_product_cardinfo(url)` — 解析视频号商品链接
 
-Default `http://localhost:8000`. Override via env `WECHAT_API_BASE_URL` or ask the user if the deploy is elsewhere. The service must be running — check with `curl -s $BASE/healthz` first; if it fails, tell the user to `docker compose up -d` (see the repo's `docker-compose.yml`) rather than guessing.
+`Article` 字段：`title`, `content` (HTML), `thumb_media_id`（必填，封面），可选 `author`, `digest`, `content_source_url`, `show_cover_pic`, `need_open_comment`, `only_fans_can_comment`。
 
-### Authentication
+### 素材 (permanent + temporary)
+Permanent（长期保存）:
+- `material_uploadimg(media=<file>)` → `{url}` — **仅用于嵌入文章 content 的 `<img>`**，不能当封面
+- `material_add(type, media=<file>, title?, introduction?)` → `{media_id, url?}` — `type ∈ {image, voice, video, thumb}`；type=video 时 title/introduction 必填
+- `material_get(media_id)` / `material_count()` / `material_batchget(type, offset, count)` / `material_delete(media_id)`
 
-The service enforces an API key when `settings.api_key` is set. Send it as header `X-API-Key: <key>` (the header name is configurable via `API_KEY_HEADER` but defaults to `X-API-Key`). Exempt paths: `/healthz`, `/docs`, `/openapi.json`, `/redoc`. If a call returns 401, the key is missing or wrong — ask the user for `WECHAT_API_KEY` rather than guessing.
+Temporary（3 天 TTL，额度小）:
+- `material_temp_upload(type, media=<file>)` → `{media_id, type, created_at}`
+- `material_temp_get(media_id)` / `material_temp_get_jssdk(media_id)` — 返回二进制
 
-### Two call modes
+### 消息 (mass / subscribe / autoreply)
+群发:
+- `message_mass_preview(touser|towxname, msgtype, ...)` — **总是先预览再 sendall**
+- `message_mass_sendall(filter={is_to_all, tag_id?}, msgtype, ...)`
+- `message_mass_uploadnews(articles)` — 群发图文专用素材
+- `message_mass_get(msg_id)` / `message_mass_delete(msg_id, article_idx=0)`
+- `message_mass_speed_get()` / `message_mass_speed_set(speed=0..4)` — 值越小越快
 
-1. **HTTP (curl / httpx)** — straightforward, use when iterating from the shell or scripting. Always POST JSON with `Content-Type: application/json` unless the endpoint is GET or a multipart upload.
-2. **MCP tools** — the service mounts FastApiMCP at `/mcp` (streamable HTTP). Each endpoint's `operation_id` (listed below) is the MCP tool name. Use this mode if an MCP client is already wired up; the server forwards `x-api-key` and `authorization` headers through to the tool calls.
+订阅/模板:
+- `message_subscribe_send(touser, template_id, scene, title, data, url?)` — scene/title/data 必填
 
-When in doubt, prefer HTTP — it's easier to show the user the exact request/response.
+自动回复:
+- `message_autoreply_info()` — 只读，不可写
 
-### Discovering the live schema
+### 基础 (rarely needed — server handles token lifecycle)
+- `get_access_token()` / `get_stable_token()` — 一般不用手动调；排查时才用
+- `clear_quota(appid?)` — ⚠️ WeChat 限制一个 AppID 每月只能重置一次，必须先问用户
+- `callback_check(action=all, check_operator=DEFAULT)` — 排查回调 URL
+- `get_api_domain_ip()` / `get_callback_ip()` — 排查防火墙/白名单
+- `healthz()` — 本地健康检查
 
-Whenever a request body is non-trivial or you're unsure of field names, fetch the OpenAPI spec instead of guessing:
+## 典型工作流
 
-```bash
-curl -s $BASE/openapi.json | jq '.paths["/wechat/draft/add"]'
+### A. 发布一篇新图文（端到端）
+
+```
+1. material_add(type="thumb", media=<cover.jpg>)        → thumb_media_id
+   # 封面必须走 material_add，不能用 uploadimg 的 url
+2. [optional] for each inline image:
+       material_uploadimg(media=<img>)                   → url
+       # 把 url 塞进 content 的 <img src="..."/>
+3. draft_add(articles=[{
+       title, author?, content=<HTML>, thumb_media_id,
+       digest? (≤120), need_open_comment?=0,
+   }])                                                   → media_id
+4. freepublish_submit(media_id)                          → publish_id
+5. loop:
+       sleep 2s
+       r = freepublish_get(publish_id)
+       if r.publish_status in terminal states: break
+   # 不要快于 2s 一次；WeChat 发布流水线是异步的
 ```
 
-This is the source of truth; the endpoint table below is for quick orientation, not schema reference.
+把每一步的返回值展示给用户。不要把 5 步静默串起来——第 3 步失败时，用户需要看到第 1 步给的 `thumb_media_id` 才能排查。
 
-## Endpoint catalog
+### B. 群发前预览
 
-All paths are relative to the base URL. `operation_id` doubles as the MCP tool name.
-
-### Meta & token
-
-| Method | Path | operation_id | Purpose |
-|---|---|---|---|
-| GET | `/healthz` | `healthz` | Liveness probe (no auth) |
-| GET | `/wechat/token` | `get_access_token` | Cached access_token (refreshes when near expiry) |
-| GET | `/wechat/stable-token` | `get_stable_token` | Stable-token variant |
-| POST | `/wechat/clear-quota` | `clear_quota` | Reset the daily API-call quota |
-| POST | `/wechat/callback/check` | `callback_check` | Verify server-config callback URL |
-| GET | `/wechat/api-domain-ip` | `get_api_domain_ip` | WeChat API server IP list |
-| GET | `/wechat/callback-ip` | `get_callback_ip` | WeChat callback source IPs |
-
-### Draft (`/wechat/draft`)
-
-Drafts are the working copy of articles before they go live.
-
-| Method | Path | operation_id | Purpose |
-|---|---|---|---|
-| POST | `/add` | `draft_add` | Create a draft with one or more articles |
-| POST | `/update` | `draft_update` | Edit an article inside an existing draft |
-| POST | `/get` | `draft_get` | Fetch a draft by media_id |
-| POST | `/batchget` | `draft_batchget` | Paginated list of drafts |
-| GET | `/count` | `draft_count` | Total draft count |
-| POST | `/delete` | `draft_delete` | Delete a draft |
-| POST | `/switch` | `draft_switch` | Toggle draft box feature |
-| POST | `/uploadimg` | — | Upload image for use inside article body (returns a WeChat CDN URL) |
-
-### Freepublish (`/wechat/freepublish`) — publish drafts publicly
-
-| Method | Path | operation_id | Purpose |
-|---|---|---|---|
-| POST | `/submit` | `freepublish_submit` | Publish a draft (returns publish_id) |
-| POST | `/get` | `freepublish_get` | Poll publish status by publish_id |
-| POST | `/delete` | `freepublish_delete` | Unpublish/delete a published article |
-| POST | `/batchget` | `freepublish_batchget` | Paginated list of published articles |
-| POST | `/getarticle` | `freepublish_getarticle` | Fetch a published article by article_id |
-
-### Material (`/wechat/material`)
-
-Permanent = persists on WeChat servers; temporary = 3-day TTL, smaller quota.
-
-| Method | Path | operation_id | Purpose |
-|---|---|---|---|
-| POST | `/permanent/add` | `material_add` | Upload permanent image/voice/video/thumb (multipart) |
-| POST | `/permanent/uploadimg` | `material_uploadimg` | Upload image used in article body |
-| POST | `/permanent/get` | `material_get` | Fetch permanent material by media_id |
-| GET | `/permanent/count` | `material_count` | Count of permanent materials by type |
-| POST | `/permanent/batchget` | `material_batchget` | Paginated list |
-| POST | `/permanent/delete` | `material_delete` | Delete permanent material |
-| POST | `/temporary/upload` | `material_temp_upload` | Upload temporary media (multipart) |
-| GET | `/temporary/get` | `material_temp_get` | Download temporary media |
-| GET | `/temporary/get-jssdk` | `material_temp_get_jssdk` | Download via JSSDK format |
-
-Multipart uploads (`add`, `uploadimg`, `temp_upload`) take `multipart/form-data` with a `media` file part — see the OpenAPI spec for required extra fields per type.
-
-### Message (`/wechat/message`)
-
-| Method | Path | operation_id | Purpose |
-|---|---|---|---|
-| POST | `/mass/sendall` | `message_mass_sendall` | Mass send to a tag or all subscribers |
-| POST | `/mass/preview` | `message_mass_preview` | Preview mass message to one OpenID/WeChat ID |
-| POST | `/mass/uploadnews` | `message_mass_uploadnews` | Upload news payload for mass send |
-| POST | `/mass/get` | `message_mass_get` | Query mass send status by msg_id |
-| POST | `/mass/delete` | `message_mass_delete` | Delete an already-sent mass message |
-| POST | `/mass/speed/get` | `message_mass_speed_get` | Get mass send speed setting |
-| POST | `/mass/speed/set` | `message_mass_speed_set` | Set mass send speed |
-| POST | `/subscribe/send` | `message_subscribe_send` | Send a subscribe/template message to one user |
-| GET | `/autoreply/info` | `message_autoreply_info` | Fetch current auto-reply configuration |
-
-## Common workflows
-
-### Publish a new article end-to-end
-
-1. Upload the thumbnail as a permanent image → `POST /wechat/material/permanent/add` (multipart, `type=image`) → get `media_id`.
-2. (Optional) Upload any in-body images → `POST /wechat/draft/uploadimg` → get WeChat CDN URL to inline in `content`.
-3. Create the draft → `POST /wechat/draft/add` with `articles: [{title, author, content, thumb_media_id, ...}]` → get draft `media_id`.
-4. Publish → `POST /wechat/freepublish/submit` with `{media_id}` → get `publish_id`.
-5. Poll → `POST /wechat/freepublish/get` with `{publish_id}` until `publish_status` is terminal.
-
-Show the user each step's result; don't chain silently — a failure on step 3 is much easier to debug if step 2's `media_id` is visible.
-
-### Preview before mass send
-
-Always offer `message/mass/preview` to a known OpenID first before `sendall`. Mass sends are rate-limited and count against the daily quota — don't burn quota to test.
-
-### Token / quota troubleshooting
-
-If a downstream WeChat error like `errcode: 45009` ("quota exceeded") surfaces through a route, `POST /wechat/clear-quota` resets the counter (rate-limited by WeChat to once per month per appid — don't call it casually; confirm with the user first).
-
-## Concrete examples
-
-### Publish a draft
-
-```bash
-BASE=${WECHAT_API_BASE_URL:-http://localhost:8000}
-KEY=$WECHAT_API_KEY
-
-# 1. Create draft
-curl -sS -X POST "$BASE/wechat/draft/add" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $KEY" \
-  -d '{
-    "articles": [{
-      "title": "Hello from wechat-api skill",
-      "author": "igor",
-      "content": "<p>body html</p>",
-      "thumb_media_id": "THUMB_MEDIA_ID_HERE",
-      "need_open_comment": 1
-    }]
-  }' | jq .
-
-# response → { "media_id": "DRAFT_MEDIA_ID" }
-
-# 2. Submit for publish
-curl -sS -X POST "$BASE/wechat/freepublish/submit" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $KEY" \
-  -d '{"media_id": "DRAFT_MEDIA_ID"}' | jq .
+```
+1. message_mass_preview(touser=<自己的 openid>, msgtype="mpnews", mpnews={media_id})
+2. 让用户确认效果
+3. message_mass_sendall(filter={is_to_all: false, tag_id: N}, msgtype="mpnews", mpnews={media_id})
 ```
 
-### Upload a permanent image (multipart)
+群发有每日额度 + 速率限制。不预览直接发：发错就烧额度。
 
-```bash
-curl -sS -X POST "$BASE/wechat/material/permanent/add" \
-  -H "X-API-Key: $KEY" \
-  -F "type=image" \
-  -F "media=@/path/to/cover.jpg" | jq .
+### C. 发订阅消息
+
+`message_subscribe_send` 的 `data` 形状：
+```json
+{
+  "thing1": {"value": "订单已发货", "color": "#000000"},
+  "time2":  {"value": "2026-04-20 10:30"}
+}
 ```
+字段名必须和模板里定义的变量名严格一致；少一个或多一个字段 → errcode 45028 之类。
 
-### Send a subscribe message
+## 错误处理
 
-```bash
-curl -sS -X POST "$BASE/wechat/message/subscribe/send" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $KEY" \
-  -d '{
-    "touser": "OPENID",
-    "template_id": "TEMPLATE_ID",
-    "page": "pages/index/index",
-    "data": { "thing1": {"value": "任务已完成"} }
-  }' | jq .
-```
+WeChat 把业务错误放在**响应 body**，HTTP 状态仍是 200。判定失败看 `errcode != 0`。
 
-## Error handling guidance
+| errcode | 含义 | 处置 |
+|---|---|---|
+| 40001 / 42001 | token 失效 | 服务端已自动重试一次；再失败 → AppSecret 有问题，让用户查 `.env` |
+| 40013 | AppID 不正确 | 检查 `.env` |
+| 40164 | IP 不在白名单 | 让用户到公众号后台"IP 白名单"加上服务器出口 IP |
+| 45009 | 当天 API 额度用尽 | 先问用户是否 `clear_quota`，再执行 |
+| 45028 | 模板消息 data 字段缺失或多余 | 对照模板定义逐字段核对 |
+| 40007 | media_id 无效 | 多半是临时素材过期（3 天），重新上传 |
+| 45015 | 48 小时内无交互，无法发客服消息 | 改用订阅/模板消息 |
 
-- **WeChat errors come through in the response body** as `{errcode, errmsg}` with HTTP 200 — don't trust HTTP status alone. A response with `errcode != 0` is a failure; surface `errmsg` to the user and, when it's a known code, suggest the fix (`40001` → token invalid, try `/wechat/token` refresh; `45009` → quota; `40164` → IP whitelist mismatch).
-- **401 from the local service** = API key issue (not WeChat's problem).
-- **5xx from the local service** = bug in this repo; capture the response body and hand it to the user for debugging rather than retrying blindly.
+返回 `errmsg` 里的英文描述要原样给用户看，不要翻译或改写——排查时原文更容易搜。
 
 ## Don'ts
 
-- Don't call api.weixin.qq.com directly — the local service owns access_token caching and concurrency control (there's a token cache file at `WECHAT_TOKEN_CACHE_PATH`). Bypassing it causes token thrash.
-- Don't loop `/wechat/freepublish/get` faster than ~once per 2s — WeChat's publish pipeline is async and rate-limited.
-- Don't call `/wechat/clear-quota` without user confirmation — it's month-rate-limited by WeChat.
-- Don't paste the API key into logs or commit messages.
+- ❌ 不要自己缓存 `access_token`。服务端有磁盘缓存 + asyncio 锁，手动缓存只会和它打架。
+- ❌ 不要把 `material_uploadimg` 返回的 URL 当作 `thumb_media_id`——两者完全不同类型；封面必须是 `material_add(type=thumb/image)` 返回的 `media_id`。
+- ❌ 不要快于 2 秒一次轮询 `freepublish_get`。
+- ❌ 不要不问用户就 `clear_quota`——微信每月每 AppID 只允许 reset 一次。
+- ❌ 不要在调用失败时盲目重试。先把 `errcode/errmsg` 给用户，让用户决定。
+- ❌ 不要绕过 MCP 直接构造 `api.weixin.qq.com` 请求——会跳过本地 token 缓存和并发保护。
+
+## 文件上传的限制
+
+`material_uploadimg` / `material_add` / `material_temp_upload` 是 multipart 文件上传。MCP 协议本身是 JSON，文件通过 MCP 客户端的具体实现传递（通常是本地路径）。如果 MCP 客户端把文件参数传给服务端后报 `422 Unprocessable` 或 `bytes decode error`，改用项目的 HTTP 路由直传（见 README 的 curl 例子），再把返回的 `media_id` 喂回后续 MCP 工具——这是已知边界，不是你的 bug。
+
+## 调试
+
+实时 schema 与示例：`http://localhost:8000/docs` 。MCP 工具的参数定义和 FastAPI OpenAPI 完全一致——字段疑惑时看那里比猜更快。

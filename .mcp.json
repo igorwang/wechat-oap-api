@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "wechat-oap": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "X-API-Key": "${WECHAT_OAP_API_KEY}"
+      }
+    }
+  }
+}
