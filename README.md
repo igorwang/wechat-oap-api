@@ -150,9 +150,30 @@ claude mcp add \
 
 Claude 会调用 MCP 工具 `get_access_token`。如果你配了 key，请求会自动带 `X-API-Key` 头；没配 key 或配错 → 401。
 
+### 安装 wechat-api Skill
+
+本仓库在 `skills/wechat-api/` 下内置了一个 Skill,指导 Claude 通过 `wechat-oap` MCP 起草公众号图文、管理素材(scope 仅限草稿,不含发布/群发)。
+
+**项目级安装**(只在当前项目生效):
+
+```bash
+mkdir -p .claude/skills
+npx -y degit igorwang/wechat-oap-api/skills/wechat-api .claude/skills/wechat-api
+```
+
+**全局安装**(所有项目都能用):
+
+```bash
+npx -y degit igorwang/wechat-oap-api/skills/wechat-api ~/.claude/skills/wechat-api
+```
+
+安装完成后,在 Claude Code 里输入类似 "帮我起草一篇公众号图文" / "上传一张封面图" 就会自动触发;也可以 `/wechat-api` 显式调用。
+
+> 前置:先完成上一节的 MCP 接入(方式 A/B/C 任一),否则 Skill 找不到 `draft_add`、`material_add` 等工具。
+
 ### Skill 怎么用
 
-Skill 里**不用**写 key。直接调 MCP 工具名即可：
+Skill 里**不用**写 key。直接调 MCP 工具名即可:
 
 ```markdown
 ---
