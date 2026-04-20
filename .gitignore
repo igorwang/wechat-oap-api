@@ -16,3 +16,6 @@ wheels/
 
 # Tooling
 .pytest_cache/
+
+# Node
+node_modules/

@@ -1,0 +1,13 @@
+{
+  "name": "wechat-api-scripts",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "gray-matter": "^4.0.3",
+    "highlight.js": "^11.10.0",
+    "juice": "^11.0.1",
+    "marked": "^15.0.0",
+    "marked-gfm-heading-id": "^4.1.1",
+    "marked-highlight": "^2.2.1"
+  }
+}
