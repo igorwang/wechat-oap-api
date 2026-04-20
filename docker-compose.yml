@@ -1,9 +1,9 @@
 services:
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: wechat-oap-api:latest
+    # Multi-arch image published to Docker Hub. Rebuild/push via
+    # `scripts/docker-push.sh`; compose itself never builds.
+    image: igorwang/wechat-oap-api:${IMAGE_TAG:-latest}
+    pull_policy: always
     container_name: wechat-oap-api
     restart: unless-stopped
     env_file:

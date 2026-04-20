@@ -27,15 +27,29 @@ uv run uvicorn main:app --reload
 
 ### 方式二：Docker Compose（推荐部署）
 
+Compose 直接消费 Docker Hub 上已发布的 multi-arch 镜像 `igorwang/wechat-oap-api`（`linux/amd64` + `linux/arm64`），**不做本地构建**：
+
 ```bash
 cp .env.example .env          # 填 WECHAT_APPID / WECHAT_APPSECRET / API_KEY
-docker compose up -d --build
+docker compose pull           # 拉最新镜像（本机架构自动匹配）
+docker compose up -d
 docker compose logs -f api
 ```
 
 - 端口默认 `:8000`，用 `.env` 的 `PORT` 可改
 - Token 缓存挂载到 `token-cache` volume，容器重启不会重新申请
 - Healthcheck 每 30s 打 `/healthz`，`docker compose ps` 能看到 `healthy` 状态
+- 固定版本：`IMAGE_TAG=0.1.0 docker compose up -d`
+
+### 构建并发布新镜像（仅维护者）
+
+```bash
+docker login -u igorwang        # 需要写权限的 Docker Hub 账号
+scripts/docker-push.sh          # 读 pyproject.toml 的 version，打 :latest + :$version
+scripts/docker-push.sh v0.2.0   # 或手动指定 tag
+```
+
+脚本用 `docker buildx --platform linux/amd64,linux/arm64` 一次构建两架构并直接 push。
 
 ### 环境变量
 
