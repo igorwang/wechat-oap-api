@@ -1,0 +1,34 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wechat-oap-api:latest
+    container_name: wechat-oap-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override so the cache lives on the mounted volume (see below).
+      WECHAT_TOKEN_CACHE_PATH: /data/.wechat_token.json
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      # Persist the WeChat access_token across restarts so we don't
+      # needlessly burn through /cgi-bin/token quota.
+      - token-cache:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request, sys
+          sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status == 200 else 1)
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  token-cache:
