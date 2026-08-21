@@ -121,6 +121,64 @@ class CustomerServiceClient:
             if not data.get("has_more"):
                 return messages
 
+    async def upload_media(
+        self, data: bytes, *, filename: str, media_type: str = "image"
+    ) -> str:
+        """上传临时素材，返回 media_id。素材 3 天后失效.
+
+        media_type: image | voice | video | file
+        """
+        token = await self.get_access_token()
+        resp = await self._client.post(
+            "/cgi-bin/media/upload",
+            params={"access_token": token, "type": media_type},
+            files={"media": (filename, data)},
+        )
+        payload = resp.json()
+        if payload.get("errcode", 0) != 0 or "media_id" not in payload:
+            raise HTTPException(502, f"media/upload failed: {payload}")
+        return payload["media_id"]
+
+    async def send_image(self, *, touser: str, open_kfid: str, media_id: str) -> dict[str, Any]:
+        return await self.send_msg(
+            {
+                "touser": touser,
+                "open_kfid": open_kfid,
+                "msgtype": "image",
+                "image": {"media_id": media_id},
+            }
+        )
+
+    async def get_customers(
+        self, external_userids: list[str], *, need_enter_session_context: int = 1
+    ) -> list[dict[str, Any]]:
+        """获取客户基础信息。仅对 48 小时内有过互动的客户有效.
+
+        unionid 需企业绑定同主体的公众号/小程序后才会下发，否则为 None。
+        """
+        data = await self._post(
+            "/cgi-bin/kf/customer/batchget",
+            {
+                "external_userid_list": external_userids,
+                "need_enter_session_context": need_enter_session_context,
+            },
+        )
+        if data.get("errcode", 0) != 0:
+            raise HTTPException(502, f"customer/batchget failed: {data}")
+        return data.get("customer_list", [])
+
+    async def get_media(self, media_id: str) -> tuple[bytes, str]:
+        """下载临时素材，返回 (二进制内容, content_type)。素材仅保留 3 天."""
+        token = await self.get_access_token()
+        resp = await self._client.get(
+            "/cgi-bin/media/get", params={"access_token": token, "media_id": media_id}
+        )
+        content_type = resp.headers.get("content-type", "")
+        # 出错时微信返回 JSON 而非二进制流
+        if content_type.startswith("application/json"):
+            raise HTTPException(502, f"media/get failed: {resp.json()}")
+        return resp.content, content_type
+
     async def send_msg(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/cgi-bin/kf/send_msg", payload)
 

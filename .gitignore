@@ -15,6 +15,9 @@ wheels/
 .wechat_token.json
 .cs_cursor.json
 
+# Bind-mounted container data (PostgreSQL)
+data/
+
 # Tooling
 .pytest_cache/
 

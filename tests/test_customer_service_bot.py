@@ -6,11 +6,24 @@ import httpx
 import pytest
 import respx
 
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from app.customer_service.bot import SupportBot
 from app.customer_service.client import CustomerServiceClient
+from app.customer_service.models import Base
+from app.customer_service.store import CustomerStore
 
 QY = "https://qyapi.weixin.qq.com"
 DS = "https://api.deepseek.com"
+
+
+@pytest.fixture
+async def store():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield CustomerStore(async_sessionmaker(engine, expire_on_commit=False))
+    await engine.dispose()
 
 
 @pytest.fixture
@@ -98,6 +111,80 @@ async def test_enter_session_sends_welcome(bot):
         body = json.loads(welcome_route.calls.last.request.content)
         assert body["code"] == "WC1"
         assert body["text"]["content"] == "欢迎咨询"
+
+
+async def test_enter_session_records_customer_profile(client, store):
+    """进入会话时抓取并落库客户资料——external_userid 只在 48h 内可查，必须当场存."""
+    bot = SupportBot(client, api_key="k", api_base=DS, store=store, welcome_text="欢迎")
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [{
+            "msgid": "e1", "open_kfid": "wk1", "external_userid": "u1",
+            "origin": 4, "msgtype": "event",
+            "event": {"event_type": "enter_session", "open_kfid": "wk1",
+                      "external_userid": "u1", "welcome_code": "WC1",
+                      "scene": "from_ad", "scene_param": "p1"},
+        }])
+        mock.post(f"{QY}/cgi-bin/kf/send_msg_on_event").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "w1"})
+        )
+        mock.post(f"{QY}/cgi-bin/kf/customer/batchget").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "customer_list": [
+                {"external_userid": "u1", "nickname": "小明",
+                 "avatar": "http://x/a.png", "gender": 1, "unionid": "o_union_1"}
+            ]})
+        )
+
+        await bot.process_event(token="EVT", open_kfid="wk1")
+
+        saved = await store.get("u1")
+        assert saved is not None
+        assert saved.nickname == "小明"
+        assert saved.unionid == "o_union_1"
+        assert saved.scene == "from_ad"
+        assert saved.scene_param == "p1"
+        assert saved.open_kfid == "wk1"
+
+
+async def test_text_message_records_sender_and_counts(client, store):
+    bot = SupportBot(client, api_key="k", api_base=DS, store=store)
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [{
+            "msgid": "m1", "open_kfid": "wk1", "external_userid": "u1",
+            "origin": 3, "msgtype": "text", "text": {"content": "在吗"},
+        }])
+        mock.post(f"{DS}/chat/completions").mock(
+            return_value=httpx.Response(200, json={
+                "choices": [{"message": {"content": "在的"}}]})
+        )
+        mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        await bot.process_event(token="EVT", open_kfid="wk1")
+
+        saved = await store.get("u1")
+        assert saved is not None
+        assert saved.message_count == 1
+
+
+async def test_bot_works_without_store(bot):
+    """未配置数据库时不应影响收发消息."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [{
+            "msgid": "m1", "open_kfid": "wk1", "external_userid": "u1",
+            "origin": 3, "msgtype": "text", "text": {"content": "hi"},
+        }])
+        mock.post(f"{DS}/chat/completions").mock(
+            return_value=httpx.Response(200, json={
+                "choices": [{"message": {"content": "hello"}}]})
+        )
+        mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
 
 
 async def test_non_customer_and_unsupported_messages_skipped(bot):

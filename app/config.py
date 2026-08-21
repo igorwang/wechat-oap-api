@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     cs_callback_token: str = ""
     cs_aes_key: str = ""
     cs_cursor_path: str = ".cs_cursor.json"
+    # PostgreSQL，形如 postgresql+asyncpg://user:pass@host:5432/db
+    # 留空则不落库（机器人仍可正常收发消息）
+    database_url: str = ""
     cs_welcome_text: str = "您好，我是智能客服助手，请问有什么可以帮您？"
 
     # DeepSeek — 机器人回复所用 LLM
@@ -25,6 +28,12 @@ class Settings(BaseSettings):
     deepseek_api_base: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
     deepseek_system_prompt: str = "你是一名专业、友善的客服助手，用简体中文简洁地回答客户问题。"
+
+    # 阿里云百炼 DashScope — 图片理解 / 语音识别（OpenAI 兼容接口）
+    dashscope_api_key: str = ""
+    dashscope_api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    dashscope_vl_model: str = "qwen3-vl-flash"
+    dashscope_asr_model: str = "qwen3-asr-flash"
     host: str = "0.0.0.0"
     port: int = 8000
 

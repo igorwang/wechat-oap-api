@@ -108,6 +108,82 @@ async def test_send_text(client):
         assert route.calls.last.request.url.params["access_token"] == "CSTOK1"
 
 
+async def test_upload_media_returns_media_id(client):
+    async with respx.mock(base_url=BASE) as mock:
+        _mock_token(mock)
+        route = mock.post("/cgi-bin/media/upload").mock(
+            return_value=httpx.Response(
+                200, json={"errcode": 0, "type": "image", "media_id": "MID_1", "created_at": "1"}
+            )
+        )
+        media_id = await client.upload_media(
+            b"\xff\xd8fake", filename="qr.jpg", media_type="image"
+        )
+        assert media_id == "MID_1"
+        assert route.calls.last.request.url.params["type"] == "image"
+        assert b"qr.jpg" in route.calls.last.request.content, "应以 multipart 带上文件名"
+
+
+async def test_upload_media_raises_on_error(client):
+    async with respx.mock(base_url=BASE) as mock:
+        _mock_token(mock)
+        mock.post("/cgi-bin/media/upload").mock(
+            return_value=httpx.Response(200, json={"errcode": 40004, "errmsg": "invalid media"})
+        )
+        with pytest.raises(Exception) as exc:
+            await client.upload_media(b"x", filename="a.jpg", media_type="image")
+        assert "40004" in str(exc.value)
+
+
+async def test_send_image(client):
+    async with respx.mock(base_url=BASE) as mock:
+        _mock_token(mock)
+        route = mock.post("/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "IM1"})
+        )
+        await client.send_image(touser="u1", open_kfid="wk1", media_id="MID_1")
+        import json
+
+        assert json.loads(route.calls.last.request.content) == {
+            "touser": "u1",
+            "open_kfid": "wk1",
+            "msgtype": "image",
+            "image": {"media_id": "MID_1"},
+        }
+
+
+async def test_get_media_returns_bytes_and_content_type(client):
+    async with respx.mock(base_url=BASE) as mock:
+        _mock_token(mock)
+        route = mock.get("/cgi-bin/media/get").mock(
+            return_value=httpx.Response(
+                200, content=b"\xff\xd8\xff\xe0JPEGDATA", headers={"Content-Type": "image/jpeg"}
+            )
+        )
+        data, content_type = await client.get_media("MEDIA_ID_1")
+        assert data == b"\xff\xd8\xff\xe0JPEGDATA"
+        assert content_type == "image/jpeg"
+        params = route.calls.last.request.url.params
+        assert params["media_id"] == "MEDIA_ID_1"
+        assert params["access_token"] == "CSTOK1"
+
+
+async def test_get_media_raises_on_json_error(client):
+    """微信出错时不返回二进制，而是返回 JSON errcode——不能当成媒体内容."""
+    async with respx.mock(base_url=BASE) as mock:
+        _mock_token(mock)
+        mock.get("/cgi-bin/media/get").mock(
+            return_value=httpx.Response(
+                200,
+                json={"errcode": 40007, "errmsg": "invalid media_id"},
+                headers={"Content-Type": "application/json"},
+            )
+        )
+        with pytest.raises(Exception) as exc:
+            await client.get_media("BAD_ID")
+        assert "40007" in str(exc.value)
+
+
 async def test_send_welcome_on_event(client):
     async with respx.mock(base_url=BASE) as mock:
         _mock_token(mock)
