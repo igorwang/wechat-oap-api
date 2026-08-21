@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 
 from app.auth import api_key_middleware
 from app.config import settings
+from app.customer_service.client import customer_service_client
+from app.routers import customer_service as customer_service_router
 from app.routers import draft as draft_router
 from app.routers import freepublish as freepublish_router
 from app.routers import material as material_router
@@ -18,6 +20,7 @@ from app.wechat import wechat_client
 async def lifespan(app: FastAPI):
     yield
     await wechat_client.close()
+    await customer_service_client.close()
 
 
 app = FastAPI(
@@ -92,6 +95,7 @@ app.include_router(freepublish_router.router)
 app.include_router(draft_router.router)
 app.include_router(material_router.router)
 app.include_router(message_router.router)
+app.include_router(customer_service_router.router)
 
 
 # MCP exposes a DELIBERATELY NARROW subset — only what's needed to build and

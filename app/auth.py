@@ -6,8 +6,16 @@ from fastapi.responses import JSONResponse
 from .config import settings
 
 
-PROTECTED_PREFIXES = ("/wechat/", "/mcp")
-EXEMPT_PATHS = {"/healthz", "/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
+PROTECTED_PREFIXES = ("/wechat/", "/mcp", "/customer-service/")
+# /customer-service/callback 由微信服务器调用，鉴权靠回调签名而非 API key
+EXEMPT_PATHS = {
+    "/healthz",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/docs/oauth2-redirect",
+    "/customer-service/callback",
+}
 
 
 def _is_protected(path: str) -> bool:

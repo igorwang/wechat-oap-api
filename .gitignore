@@ -13,6 +13,7 @@ wheels/
 .env
 .python-version
 .wechat_token.json
+.cs_cursor.json
 
 # Tooling
 .pytest_cache/
