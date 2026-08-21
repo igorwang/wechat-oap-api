@@ -187,6 +187,18 @@ async def test_bot_works_without_store(bot):
         assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
 
 
+async def test_process_event_never_raises_when_sync_fails(bot):
+    """process_event 跑在 BackgroundTask 里；抛异常会让 starlette 在响应已发出后炸掉."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        mock.post(f"{QY}/cgi-bin/kf/sync_msg").mock(
+            return_value=httpx.Response(
+                200, json={"errcode": 95000, "errmsg": "invalid open_kfid", "msg_list": []}
+            )
+        )
+        assert await bot.process_event(token="EVT", open_kfid="bad_kfid") == 0
+
+
 async def test_non_customer_and_unsupported_messages_skipped(bot):
     async with respx.mock as mock:
         _mock_qy_token(mock)

@@ -117,8 +117,16 @@ class SupportBot:
         return True
 
     async def process_event(self, *, token: str = "", open_kfid: str = "") -> int:
-        """处理一次 kf_msg_or_event 回调：拉取新消息并逐条响应，返回已处理条数."""
-        messages = await self._client.sync_msg(token=token, open_kfid=open_kfid)
+        """处理一次 kf_msg_or_event 回调：拉取新消息并逐条响应，返回已处理条数.
+
+        跑在 BackgroundTask 里，响应此时已发出，抛异常只会变成一句无用的
+        "response already started" —— 所以这里必须自己消化掉所有错误。
+        """
+        try:
+            messages = await self._client.sync_msg(token=token, open_kfid=open_kfid)
+        except Exception:
+            logger.exception("sync_msg failed (open_kfid=%s)", open_kfid)
+            return 0
         handled = 0
         for msg in messages:
             try:
