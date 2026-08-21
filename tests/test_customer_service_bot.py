@@ -45,6 +45,8 @@ def bot(client):
         model="deepseek-chat",
         system_prompt="你是客服",
         welcome_text="欢迎咨询",
+        # 关注门禁单独测（见文件末尾），这里只关心消息收发本身
+        require_unionid=False,
     )
 
 
@@ -212,3 +214,120 @@ async def test_non_customer_and_unsupported_messages_skipped(bot):
         ])
         handled = await bot.process_event(token="EVT", open_kfid="wk1")
         assert handled == 0
+
+
+# ---- 关注公众号门禁：没有 unionid 就先引导关注，不进 AI 对话 ----
+
+
+def _gated_bot(client, store=None):
+    return SupportBot(
+        client, api_key="k", api_base=DS, system_prompt="你是客服",
+        store=store, require_unionid=True,
+    )
+
+
+def _customer_msg(content="怎么退货？"):
+    return [{
+        "msgid": "m1", "open_kfid": "wk1", "external_userid": "u1",
+        "origin": 3, "msgtype": "text", "text": {"content": content},
+    }]
+
+
+async def test_customer_without_unionid_gets_qrcode_instead_of_llm(client):
+    """没关注公众号（拿不到 unionid）时不接入 AI，改发引导文案 + 二维码."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, _customer_msg())
+        mock.post(f"{QY}/cgi-bin/kf/customer/batchget").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "customer_list": [
+                {"external_userid": "u1", "nickname": "小明"}  # 无 unionid
+            ]})
+        )
+        upload = mock.post(f"{QY}/cgi-bin/media/upload").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "media_id": "QR_MID"})
+        )
+        ds = mock.post(f"{DS}/chat/completions")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        handled = await _gated_bot(client).process_event(token="EVT", open_kfid="wk1")
+
+        assert handled == 1
+        assert not ds.called, "未关注的客户不应消耗 LLM 调用"
+        assert upload.call_count == 1
+        bodies = [json.loads(c.request.content) for c in send.calls]
+        assert [b["msgtype"] for b in bodies] == ["text", "image"]
+        assert bodies[1]["image"]["media_id"] == "QR_MID"
+        assert all(b["touser"] == "u1" and b["open_kfid"] == "wk1" for b in bodies)
+
+
+async def test_customer_with_unionid_reaches_llm(client):
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, _customer_msg())
+        mock.post(f"{QY}/cgi-bin/kf/customer/batchget").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "customer_list": [
+                {"external_userid": "u1", "nickname": "小明", "unionid": "o_union_1"}
+            ]})
+        )
+        ds = mock.post(f"{DS}/chat/completions").mock(
+            return_value=httpx.Response(200, json={
+                "choices": [{"message": {"content": "这个我需要帮您确认"}}]
+            })
+        )
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        handled = await _gated_bot(client).process_event(token="EVT", open_kfid="wk1")
+
+        assert handled == 1
+        assert ds.called
+        assert json.loads(send.calls.last.request.content)["text"]["content"] == "这个我需要帮您确认"
+
+
+async def test_known_unionid_is_read_from_store_not_refetched(client, store):
+    """库里已有 unionid 就不必每条消息都打一次 batchget."""
+    await store.upsert({"external_userid": "u1", "unionid": "o_union_1"})
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, _customer_msg())
+        batchget = mock.post(f"{QY}/cgi-bin/kf/customer/batchget")
+        mock.post(f"{DS}/chat/completions").mock(
+            return_value=httpx.Response(200, json={"choices": [{"message": {"content": "好的"}}]})
+        )
+        mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        handled = await _gated_bot(client, store).process_event(token="EVT", open_kfid="wk1")
+
+        assert handled == 1
+        assert not batchget.called
+
+
+async def test_qrcode_media_id_is_reused_across_messages(client):
+    """临时素材 3 天有效，不该每条消息都重传一次二维码."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [
+            {"msgid": "m1", "open_kfid": "wk1", "external_userid": "u1",
+             "origin": 3, "msgtype": "text", "text": {"content": "在吗"}},
+            {"msgid": "m2", "open_kfid": "wk1", "external_userid": "u1",
+             "origin": 3, "msgtype": "text", "text": {"content": "有人吗"}},
+        ])
+        mock.post(f"{QY}/cgi-bin/kf/customer/batchget").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "customer_list": [
+                {"external_userid": "u1"}
+            ]})
+        )
+        upload = mock.post(f"{QY}/cgi-bin/media/upload").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "media_id": "QR_MID"})
+        )
+        mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        assert await _gated_bot(client).process_event(token="EVT", open_kfid="wk1") == 2
+        assert upload.call_count == 1

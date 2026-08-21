@@ -1,15 +1,22 @@
 """客服机器人编排：回调事件 → sync_msg 拉取 → DeepSeek 生成回复 → send_msg 下发."""
 
 import logging
+import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from ..config import settings
 from .client import CustomerServiceClient, customer_service_client
+from .prompts import FOLLOW_PROMPT, SYSTEM_PROMPT
 from .store import CustomerStore
 
 logger = logging.getLogger(__name__)
+
+_QR_PATH = Path(__file__).resolve().parent.parent / "static" / "qrcode-official-account.jpg"
+# 微信临时素材 3 天失效，留一天余量
+_QR_MEDIA_TTL = 2 * 24 * 3600
 
 
 class SupportBot:
@@ -23,15 +30,19 @@ class SupportBot:
         system_prompt: str | None = None,
         welcome_text: str | None = None,
         store: "CustomerStore | None" = None,
+        require_unionid: bool | None = None,
     ) -> None:
         self._client = client
         self.store = store
+        self._require_unionid = (
+            require_unionid if require_unionid is not None else settings.cs_require_unionid
+        )
+        self._qr_media_id: str | None = None
+        self._qr_media_at = 0.0
         self._api_key = api_key if api_key is not None else settings.deepseek_api_key
         self._api_base = api_base or settings.deepseek_api_base
         self._model = model or settings.deepseek_model
-        self._system_prompt = (
-            system_prompt if system_prompt is not None else settings.deepseek_system_prompt
-        )
+        self._system_prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
         self._welcome_text = (
             welcome_text if welcome_text is not None else settings.cs_welcome_text
         )
@@ -85,6 +96,55 @@ class SupportBot:
         except Exception:
             logger.exception("failed to persist customer %s", external_userid)
 
+    async def _lookup_unionid(self, external_userid: str, *, open_kfid: str = "") -> str | None:
+        """取客户 unionid：先读库，未命中再打接口并顺手落库.
+
+        unionid 只对已关注同主体公众号（或用过小程序）的客户下发，所以拿不到
+        就等同于"还没关注"。
+        """
+        if self.store:
+            try:
+                row = await self.store.get(external_userid)
+                if row and row.unionid:
+                    return row.unionid
+            except Exception:
+                logger.exception("failed to read customer %s", external_userid)
+        try:
+            found = await self._client.get_customers([external_userid])
+        except Exception:
+            # 查不到就当作未关注拦下——放行会让门禁静默失效，那才是更难发现的故障
+            logger.exception("failed to fetch profile for %s", external_userid)
+            return None
+        if not found:
+            logger.warning("customer/batchget returned nothing for %s", external_userid)
+            return None
+        profile = found[0]
+        if self.store:
+            try:
+                await self.store.upsert(profile, open_kfid=open_kfid or None)
+            except Exception:
+                logger.exception("failed to persist customer %s", external_userid)
+        return profile.get("unionid") or None
+
+    async def _qr_media_id_cached(self) -> str | None:
+        now = time.monotonic()
+        if self._qr_media_id and now - self._qr_media_at < _QR_MEDIA_TTL:
+            return self._qr_media_id
+        try:
+            data = _QR_PATH.read_bytes()
+        except OSError:
+            logger.exception("公众号二维码缺失: %s", _QR_PATH)
+            return None
+        self._qr_media_id = await self._client.upload_media(data, filename=_QR_PATH.name)
+        self._qr_media_at = now
+        return self._qr_media_id
+
+    async def _send_follow_prompt(self, *, touser: str, open_kfid: str) -> None:
+        await self._client.send_text(touser=touser, open_kfid=open_kfid, content=FOLLOW_PROMPT)
+        media_id = await self._qr_media_id_cached()
+        if media_id:
+            await self._client.send_image(touser=touser, open_kfid=open_kfid, media_id=media_id)
+
     async def _handle(self, msg: dict[str, Any]) -> bool:
         msgtype = msg.get("msgtype")
         if msgtype == "event":
@@ -110,6 +170,13 @@ class SupportBot:
             open_kfid=msg.get("open_kfid", ""),
             bump_message_count=True,
         )
+        if self._require_unionid and not await self._lookup_unionid(
+            msg["external_userid"], open_kfid=msg["open_kfid"]
+        ):
+            await self._send_follow_prompt(
+                touser=msg["external_userid"], open_kfid=msg["open_kfid"]
+            )
+            return True
         answer = await self.reply(msg["text"]["content"])
         await self._client.send_text(
             touser=msg["external_userid"], open_kfid=msg["open_kfid"], content=answer
