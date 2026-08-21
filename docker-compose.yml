@@ -15,6 +15,9 @@ services:
       # working dir it would reset on every recreate, re-pulling old messages
       # and replying to them a second time.
       CS_CURSOR_PATH: /data/.cs_cursor.json
+      # 落盘日志。/data 是命名卷（宿主机看不到），所以日志目录单独 bind 出来，
+      # 方便直接 tail/grep ./data/log/app.log 排查。
+      LOG_DIR: /data/log
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-wechat}:${POSTGRES_PASSWORD:-wechat}@db:5432/${POSTGRES_DB:-wechat}
     depends_on:
       db:
@@ -25,6 +28,8 @@ services:
       # Persist the WeChat access_token across restarts so we don't
       # needlessly burn through /cgi-bin/token quota.
       - token-cache:/data
+      # 嵌套挂载：/data 走命名卷，/data/log 单独绑到宿主机目录
+      - ./data/log:/data/log
     healthcheck:
       test:
         - CMD

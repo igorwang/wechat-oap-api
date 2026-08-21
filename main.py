@@ -9,9 +9,12 @@ from pydantic import BaseModel, Field
 
 from app.auth import api_key_middleware
 from app.config import settings
+from app.logging_config import setup_logging
 from app.customer_service.bot import support_bot
 from app.customer_service.client import customer_service_client
 from app.customer_service.store import CustomerStore
+from app.follower_store import FollowerStore
+from app.followers import follower_directory
 from app.db import init_database
 from app.routers import customer_service as customer_service_router
 from app.routers import wechat_callback as wechat_callback_router
@@ -24,9 +27,11 @@ from app.wechat import wechat_client
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_logging()
     database = await init_database()
     if database:
         support_bot.store = CustomerStore(database.sessions)
+        follower_directory.store = FollowerStore(database.sessions)
     yield
     await wechat_client.close()
     await customer_service_client.close()

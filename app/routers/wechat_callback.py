@@ -40,11 +40,17 @@ async def _apply_follow_event(event: str, openid: str) -> None:
     """跑在 BackgroundTask 里，响应已发出——异常只能自己消化掉."""
     try:
         if event == "subscribe":
-            await follower_directory.record_subscribe(openid)
+            unionid = await follower_directory.record_subscribe(openid)
+            logger.info("✅ 关注公众号 openid=%s unionid=%s", openid, unionid)
         else:
-            await follower_directory.record_unsubscribe(openid)
+            unionid = await follower_directory.record_unsubscribe(openid)
+            logger.info("❌ 取消关注 openid=%s unionid=%s", openid, unionid)
+        if not unionid:
+            logger.warning(
+                "%s 事件拿不到 unionid（openid=%s），该用户无法与客服侧对账", event, openid
+            )
     except Exception:
-        logger.exception("failed to apply %s for %s", event, openid)
+        logger.exception("处理 %s 事件失败 openid=%s", event, openid)
 
 
 @router.get("/callback", operation_id="wechat_callback_verify")
@@ -85,8 +91,16 @@ async def callback_event(
         # 明文/兼容模式
         xml = body
 
-    if _xml_field(xml, "MsgType") == "event":
+    msgtype = _xml_field(xml, "MsgType")
+    openid = _xml_field(xml, "FromUserName")
+    if msgtype == "event":
         event = _xml_field(xml, "Event").lower()
+        logger.info("公众号事件 event=%s openid=%s", event, openid)
         if event in ("subscribe", "unsubscribe"):
-            background.add_task(_apply_follow_event, event, _xml_field(xml, "FromUserName"))
+            background.add_task(_apply_follow_event, event, openid)
+    else:
+        logger.info(
+            "公众号消息 type=%s openid=%s content=%r",
+            msgtype, openid, _xml_field(xml, "Content")[:100],
+        )
     return PlainTextResponse("success")

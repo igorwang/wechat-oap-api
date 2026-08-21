@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     dashscope_api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_vl_model: str = "qwen3-vl-flash"
     dashscope_asr_model: str = "qwen3-asr-flash"
+    # 日志落盘目录；留空则只打控制台。compose 里挂到 ./data/log
+    log_dir: str = ""
+    log_level: str = "INFO"
+    # 日志总磁盘预算（MB），由当前文件和 log_backups 个备份平分
+    log_max_mb: int = 50
+    log_backups: int = 4
     host: str = "0.0.0.0"
     port: int = 8000
 

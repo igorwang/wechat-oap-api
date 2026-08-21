@@ -4,14 +4,19 @@
 发起一次客服会话就会被分配 unionid，从没关注过的号也有；而且取关不回收。
 实测 5 个客户（含 1 个从未关注、1 个已取关）全部有 unionid，判据完全失效。
 
-真实关注状态只能从公众号侧取：/cgi-bin/user/get 只列出**当前**关注者，
-取关的人会从名单里消失。
+真实关注状态只能从公众号侧取，且以事件为主、全量拉取为辅：
+  subscribe / unsubscribe 回调  →  实时更新（主）
+  user/get + user/info/batchget →  冷启动播种、定期纠偏（辅，回调会丢）
+
+配了 DATABASE_URL 时状态落库（重启不丢、多副本一致）；没配则退化成进程内
+集合，功能一样只是不持久。
 """
 
 import asyncio
 import logging
 import time
 
+from .follower_store import FollowerStore
 from .wechat import WeChatClient, wechat_client
 
 logger = logging.getLogger(__name__)
@@ -23,29 +28,37 @@ _MAX_PAGES = 50
 
 
 class FollowerDirectory:
-    """缓存公众号关注者的 unionid 集合。
+    """判断某个 unionid 当前是否关注了公众号.
 
-    整份名单按 ttl 过期。问到一个不在名单里的 unionid 时，如果距上次拉取
-    已超过 refresh_on_miss_after 秒就重拉一次——否则刚关注完的人会被上一轮
-    的旧名单挡住，而这恰恰是引导关注后最常见的一步。
+    ttl 是全量纠偏的间隔，不是判据的主要来源——关注/取关靠回调实时生效。
+    问到一个不在名单里的 unionid 时，如果距上次拉取已超过 refresh_on_miss_after
+    秒就重拉一次，避免刚关注完的人被旧名单挡住（回调万一没到）。
     """
 
     def __init__(
         self,
         client: WeChatClient | None = None,
         *,
+        store: FollowerStore | None = None,
         ttl: float = 300.0,
         refresh_on_miss_after: float = 30.0,
     ) -> None:
         self._client = client or wechat_client
+        self.store = store
         self._ttl = ttl
         self._refresh_on_miss_after = refresh_on_miss_after
         self._unionids: set[str] = set()
         self._fetched_at = 0.0
         self._lock = asyncio.Lock()
 
-    async def _fetch(self) -> set[str]:
-        """分页拉全量关注者，换回 unionid 集合."""
+    # ---------------- 全量拉取（冷启动 / 纠偏） ----------------
+
+    async def _fetch(self) -> list[tuple[str, str | None]]:
+        """分页拉全量关注者，返回 (openid, unionid) 对.
+
+        openid 也要留着：取关回调只带 openid，而 user/info 在 subscribe=0 时
+        不再返回 unionid，没有这层映射就撤销不了关注状态。
+        """
         openids: list[str] = []
         cursor = ""
         for _ in range(_MAX_PAGES):
@@ -62,7 +75,7 @@ class FollowerDirectory:
         else:
             logger.warning("user/get 达到 %d 页上限，关注者名单可能不完整", _MAX_PAGES)
 
-        unionids: set[str] = set()
+        pairs: list[tuple[str, str | None]] = []
         for start in range(0, len(openids), _BATCH_SIZE):
             chunk = openids[start : start + _BATCH_SIZE]
             data = await self._client.call_json(
@@ -75,40 +88,54 @@ class FollowerDirectory:
             for info in data.get("user_info_list") or []:
                 # subscribe=0 是已取关；无 unionid 说明公众号没绑开放平台
                 if info.get("subscribe") == 1 and info.get("unionid"):
-                    unionids.add(info["unionid"])
-        logger.info("公众号关注者 %d 人，其中 %d 人有 unionid", len(openids), len(unionids))
-        return unionids
+                    pairs.append((info["openid"], info["unionid"]))
+        logger.info("公众号关注者 %d 人，其中 %d 人有 unionid", len(openids), len(pairs))
+        return pairs
 
     async def _refresh(self) -> None:
         async with self._lock:
-            fetched = await self._fetch()
-            self._unionids = fetched
+            pairs = await self._fetch()
+            self._unionids = {u for _, u in pairs if u}
             self._fetched_at = time.monotonic()
+            if self.store:
+                await self.store.replace_all(pairs)
+
+    async def _refresh_if_stale(self, older_than: float) -> None:
+        if time.monotonic() - self._fetched_at >= older_than:
+            await self._refresh()
 
     async def unionids(self) -> set[str]:
-        if time.monotonic() - self._fetched_at >= self._ttl:
-            await self._refresh()
+        """进程内的关注者 unionid 集合（未配库时的判据）."""
+        await self._refresh_if_stale(self._ttl)
         return self._unionids
 
-    async def record_subscribe(self, openid: str) -> str | None:
-        """收到 subscribe 回调：用 openid 换 unionid 并立刻记进名单.
+    # ---------------- 回调事件（主要维护方式） ----------------
 
-        事件驱动是这份名单的主要维护方式，全量拉取只用于冷启动兜底。
-        """
+    async def record_subscribe(self, openid: str) -> str | None:
+        """收到 subscribe 回调：用 openid 换 unionid 并立刻记进名单."""
         unionid = await self._unionid_of(openid)
         if unionid:
             self._unionids.add(unionid)
+        if self.store:
+            await self.store.mark_subscribed(openid, unionid)
         return unionid
 
     async def record_unsubscribe(self, openid: str) -> str | None:
-        """收到 unsubscribe 回调：立刻从名单里去掉，不必等 TTL 过期."""
-        unionid = await self._unionid_of(openid)
+        """收到 unsubscribe 回调：立刻撤销关注状态.
+
+        这里不调 user/info——取关后它只返回 openid，拿不到 unionid。库里存着
+        关注时记下的映射，按 openid 反查即可。没配库时只能退回去问接口，拿不到
+        就等 ttl 纠偏。
+        """
+        if self.store:
+            unionid = await self.store.mark_unsubscribed(openid)
+        else:
+            unionid = await self._unionid_of(openid)
         if unionid:
             self._unionids.discard(unionid)
         return unionid
 
     async def _unionid_of(self, openid: str) -> str | None:
-        """openid → unionid。取关后 user/info 仍会返回 unionid，只是 subscribe=0."""
         if not openid:
             return None
         data = await self._client.call_json(
@@ -118,14 +145,20 @@ class FollowerDirectory:
             raise RuntimeError(f"user/info failed: {data}")
         return data.get("unionid") or None
 
+    # ---------------- 判据 ----------------
+
     async def is_follower(self, unionid: str | None) -> bool:
         if not unionid:
             return False
-        known = await self.unionids()
-        if unionid in known:
+        if self.store:
+            if await self.store.is_follower(unionid):
+                return True
+            # 没命中可能是回调丢了或库还没播种，纠偏一次再判
+            await self._refresh_if_stale(self._refresh_on_miss_after)
+            return await self.store.is_follower(unionid)
+        if unionid in await self.unionids():
             return True
-        if time.monotonic() - self._fetched_at >= self._refresh_on_miss_after:
-            await self._refresh()
+        await self._refresh_if_stale(self._refresh_on_miss_after)
         return unionid in self._unionids
 
 

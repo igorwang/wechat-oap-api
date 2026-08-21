@@ -110,7 +110,9 @@ class SupportBot:
         if not unionid:
             return False
         try:
-            return await self._followers.is_follower(unionid)
+            followed = await self._followers.is_follower(unionid)
+            logger.info("关注状态 unionid=%s followed=%s", unionid, followed)
+            return followed
         except Exception:
             # 拉不到关注名单时按未关注拦下——放行会让门禁静默失效，比误拦难发现
             logger.exception("failed to check follower status for %s", external_userid)
@@ -174,27 +176,40 @@ class SupportBot:
                 )
             code = event.get("welcome_code")
             if event.get("event_type") == "enter_session" and code:
+                logger.info(
+                    "👋 进入会话 from=%s scene=%r，发送欢迎语",
+                    event.get("external_userid"), event.get("scene", ""),
+                )
                 await self._client.send_welcome(code=code, content=self._welcome_text)
                 return True
             return False
         # 3 = 客户发送的消息
         if msg.get("origin") != 3 or msgtype != "text":
+            logger.info(
+                "跳过消息 msgid=%s origin=%s type=%s（只处理客户发来的文本）",
+                msg.get("msgid"), msg.get("origin"), msgtype,
+            )
             return False
+        external_userid = msg["external_userid"]
+        content = msg["text"]["content"]
+        logger.info("💬 收到消息 from=%s content=%r", external_userid, content[:100])
         await self._record(
             msg.get("external_userid", ""),
             open_kfid=msg.get("open_kfid", ""),
             bump_message_count=True,
         )
         if self._require_follow and not await self._is_follower(
-            msg["external_userid"], open_kfid=msg["open_kfid"]
+            external_userid, open_kfid=msg["open_kfid"]
         ):
+            logger.info("🚧 门禁拦下（未关注公众号）from=%s，发送引导二维码", external_userid)
             await self._send_follow_prompt(
-                touser=msg["external_userid"], open_kfid=msg["open_kfid"]
+                touser=external_userid, open_kfid=msg["open_kfid"]
             )
             return True
-        answer = await self.reply(msg["text"]["content"])
+        answer = await self.reply(content)
+        logger.info("🤖 已回复 to=%s content=%r", external_userid, answer[:100])
         await self._client.send_text(
-            touser=msg["external_userid"], open_kfid=msg["open_kfid"], content=answer
+            touser=external_userid, open_kfid=msg["open_kfid"], content=answer
         )
         return True
 
@@ -209,6 +224,8 @@ class SupportBot:
         except Exception:
             logger.exception("sync_msg failed (open_kfid=%s)", open_kfid)
             return 0
+        if messages:
+            logger.info("拉取到 %d 条新消息 open_kfid=%s", len(messages), open_kfid)
         handled = 0
         for msg in messages:
             try:

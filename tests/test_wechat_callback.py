@@ -176,3 +176,64 @@ def test_event_post_rejects_bad_msg_signature(client):
         headers={"Content-Type": "text/xml"},
     )
     assert resp.status_code == 403
+
+
+# ---- 落库路径：关注状态存 DB，取关不依赖 user/info ----
+
+
+@pytest.fixture
+async def db_directory():
+    """把 follower_directory 接到一个真实（SQLite）库上，用完还原."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.customer_service.models import Base
+    from app.follower_store import FollowerStore
+    from app.followers import follower_directory
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    follower_directory.store = FollowerStore(async_sessionmaker(engine, expire_on_commit=False))
+    yield follower_directory
+    follower_directory.store = None
+    await engine.dispose()
+
+
+async def test_subscribe_then_unsubscribe_flips_gate_via_db(client, db_directory):
+    """完整走一遍：关注 → 门禁放行；取关 → 门禁拦下。全部以库为准."""
+    with respx.mock(base_url=API) as mock:
+        mock.get("/cgi-bin/token").mock(
+            return_value=httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
+        )
+        user_info = mock.get("/cgi-bin/user/info").mock(
+            return_value=httpx.Response(200, json={"subscribe": 1, "openid": "o_a",
+                                                   "unionid": "u_a"})
+        )
+
+        assert _post_event(client, _event_xml("subscribe", "o_a")).status_code == 200
+        assert await db_directory.store.is_follower("u_a") is True
+        assert user_info.call_count == 1
+
+        assert _post_event(client, _event_xml("unsubscribe", "o_a")).status_code == 200
+
+        assert await db_directory.store.is_follower("u_a") is False
+        # 取关后 user/info 不再返回 unionid，所以这条路必须不依赖它
+        assert user_info.call_count == 1, "取关不应再调 user/info"
+
+
+async def test_resubscribe_restores_access(client, db_directory):
+    with respx.mock(base_url=API) as mock:
+        mock.get("/cgi-bin/token").mock(
+            return_value=httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
+        )
+        mock.get("/cgi-bin/user/info").mock(
+            return_value=httpx.Response(200, json={"subscribe": 1, "openid": "o_b",
+                                                   "unionid": "u_b"})
+        )
+        _post_event(client, _event_xml("subscribe", "o_b"))
+        _post_event(client, _event_xml("unsubscribe", "o_b"))
+        assert await db_directory.store.is_follower("u_b") is False
+
+        _post_event(client, _event_xml("subscribe", "o_b"))
+
+        assert await db_directory.store.is_follower("u_b") is True
