@@ -47,17 +47,27 @@ def setup_logging(
     root.addHandler(console)
 
     if log_dir:
-        directory = Path(log_dir)
-        directory.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            directory / "app.log",
-            maxBytes=max_mb * 1024 * 1024 // (backups + 1),
-            backupCount=backups,
-            encoding="utf-8",
-        )
-        file_handler.setFormatter(formatter)
-        setattr(file_handler, _MARK, True)
-        root.addHandler(file_handler)
+        # 挂载目录的属主经常和容器用户对不上。落盘失败只是少记日志，绝不能
+        # 让服务起不来——降级成只打控制台，并把原因喊出来。
+        try:
+            directory = Path(log_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                directory / "app.log",
+                maxBytes=max_mb * 1024 * 1024 // (backups + 1),
+                backupCount=backups,
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            root.warning(
+                "日志目录 %s 不可写(%s)，本次只输出到控制台。"
+                "容器内用户是 uid 10001，宿主机执行 chown -R 10001:10001 %s 可修复",
+                log_dir, exc, log_dir,
+            )
+        else:
+            file_handler.setFormatter(formatter)
+            setattr(file_handler, _MARK, True)
+            root.addHandler(file_handler)
 
     # uvicorn 自带 handler 且默认不向上传播，不改这两行访问日志就进不了文件
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):

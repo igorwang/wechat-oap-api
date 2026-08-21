@@ -1,6 +1,10 @@
 """日志落盘配置."""
 
 import logging
+import os
+from logging.handlers import RotatingFileHandler
+
+import pytest
 
 from app.logging_config import setup_logging
 
@@ -87,3 +91,19 @@ def test_rotation_settings_split_the_budget_across_files(tmp_path):
     )
     assert handler.backupCount == 4
     assert handler.maxBytes * (handler.backupCount + 1) == 50 * 1024 * 1024
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root 绕过文件权限，测不出来")
+def test_unwritable_dir_falls_back_to_console_instead_of_crashing(tmp_path, caplog):
+    """日志目录没权限时只能少记日志，绝不能让服务起不来."""
+    log_dir = tmp_path / "readonly"
+    log_dir.mkdir()
+    log_dir.chmod(0o500)
+    try:
+        setup_logging(log_dir=str(log_dir), level="INFO")   # 不抛
+        logging.getLogger("app.test").info("still alive")
+        handlers = logging.getLogger().handlers
+        assert any(isinstance(h, logging.StreamHandler) for h in handlers)
+        assert not any(isinstance(h, RotatingFileHandler) for h in handlers)
+    finally:
+        log_dir.chmod(0o700)

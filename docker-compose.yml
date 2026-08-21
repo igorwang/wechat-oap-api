@@ -22,6 +22,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      log-init:
+        condition: service_completed_successfully
     ports:
       - "${PORT:-8000}:8000"
     volumes:
@@ -43,6 +45,18 @@ services:
       # 启动时要同步一次公众号关注者名单（上限 30s），给足宽限期
       start_period: 45s
       retries: 3
+
+  # 绑出去的日志目录由 Docker 以 root 建，而 api 跑在 uid 10001 上，直接写会
+  # PermissionError。起容器前先把属主改过来，免得每换一台宿主机都要手动 chown。
+  # 复用 api 镜像避免多拉一个 busybox。
+  log-init:
+    image: igorwang/wechat-oap-api:${IMAGE_TAG:-latest}
+    container_name: wechat-oap-log-init
+    user: root
+    entrypoint: ["sh", "-c", "mkdir -p /data/log && chown -R 10001:10001 /data/log"]
+    volumes:
+      - ./data/log:/data/log
+    restart: "no"
 
   db:
     image: postgres:17-alpine
