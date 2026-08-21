@@ -100,6 +100,26 @@ class FollowerDirectory:
             if self.store:
                 await self.store.replace_all(pairs)
 
+    async def bootstrap(self, timeout: float = 30.0) -> int:
+        """启动时播种关注者名单，返回已关注人数.
+
+        不播种的话，库是空的，第一个发消息的老粉丝会被误拦一次（要等门禁落空
+        触发的那次纠偏跑完才恢复）。
+
+        失败或超时都只记日志不抛：公众号凭证/IP 白名单没配好不该让服务起不来，
+        大不了退回按需纠偏。
+        """
+        try:
+            await asyncio.wait_for(self._refresh(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("关注者名单同步超时（>%ss），改为按需纠偏", timeout)
+            return 0
+        except Exception:
+            logger.exception("关注者名单同步失败，改为按需纠偏")
+            return 0
+        logger.info("关注者名单已同步：%d 人", len(self._unionids))
+        return len(self._unionids)
+
     async def _refresh_if_stale(self, older_than: float) -> None:
         if time.monotonic() - self._fetched_at >= older_than:
             await self._refresh()

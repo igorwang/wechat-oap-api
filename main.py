@@ -32,6 +32,9 @@ async def lifespan(app: FastAPI):
     if database:
         support_bot.store = CustomerStore(database.sessions)
         follower_directory.store = FollowerStore(database.sessions)
+    # 先把现有粉丝灌进来，否则第一个发消息的老粉丝会被门禁误拦一次
+    if settings.cs_require_follow:
+        await follower_directory.bootstrap()
     yield
     await wechat_client.close()
     await customer_service_client.close()

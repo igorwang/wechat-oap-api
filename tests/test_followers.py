@@ -138,3 +138,47 @@ async def test_empty_unionid_is_never_a_follower(wechat):
     directory = FollowerDirectory(wechat)
     assert await directory.is_follower("") is False
     assert await directory.is_follower(None) is False
+
+
+# ---- 启动播种 ----
+
+
+async def test_bootstrap_seeds_the_directory(wechat):
+    async with respx.mock(base_url=API) as mock:
+        _mock_token(mock)
+        _mock_user_get(mock, [
+            {"count": 2, "data": {"openid": ["o1", "o2"]}, "next_openid": "o2"},
+            {"count": 0, "data": {}, "next_openid": ""},
+        ])
+        _mock_batchget(mock, [{"user_info_list": [
+            {"subscribe": 1, "openid": "o1", "unionid": "u1"},
+            {"subscribe": 1, "openid": "o2", "unionid": "u2"},
+        ]}])
+
+        directory = FollowerDirectory(wechat)
+        assert await directory.bootstrap() == 2
+        assert await directory.is_follower("u1") is True
+
+
+async def test_bootstrap_never_raises_when_the_api_fails(wechat):
+    """公众号 IP 白名单没配好之类的问题不该让服务起不来."""
+    async with respx.mock(base_url=API) as mock:
+        _mock_token(mock)
+        mock.get("/cgi-bin/user/get").mock(
+            return_value=httpx.Response(200, json={"errcode": 40164, "errmsg": "invalid ip"})
+        )
+
+        assert await FollowerDirectory(wechat).bootstrap() == 0
+
+
+async def test_bootstrap_gives_up_instead_of_hanging_startup(wechat, monkeypatch):
+    """粉丝多时全量同步可能很久，不能把启动卡死."""
+    import asyncio
+
+    async def never_finishes():
+        await asyncio.sleep(60)
+
+    directory = FollowerDirectory(wechat)
+    monkeypatch.setattr(directory, "_refresh", never_finishes)
+
+    assert await directory.bootstrap(timeout=0.05) == 0
