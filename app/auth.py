@@ -7,7 +7,7 @@ from .config import settings
 
 
 PROTECTED_PREFIXES = ("/wechat/", "/mcp", "/customer-service/")
-# /customer-service/callback 由微信服务器调用，鉴权靠回调签名而非 API key
+# 两个 /callback 都由微信服务器调用，鉴权靠回调签名而非 API key
 EXEMPT_PATHS = {
     "/healthz",
     "/docs",
@@ -15,6 +15,7 @@ EXEMPT_PATHS = {
     "/openapi.json",
     "/docs/oauth2-redirect",
     "/customer-service/callback",
+    "/wechat/callback",
 }
 
 

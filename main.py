@@ -14,6 +14,7 @@ from app.customer_service.client import customer_service_client
 from app.customer_service.store import CustomerStore
 from app.db import init_database
 from app.routers import customer_service as customer_service_router
+from app.routers import wechat_callback as wechat_callback_router
 from app.routers import draft as draft_router
 from app.routers import freepublish as freepublish_router
 from app.routers import material as material_router
@@ -106,6 +107,7 @@ app.include_router(draft_router.router)
 app.include_router(material_router.router)
 app.include_router(message_router.router)
 app.include_router(customer_service_router.router)
+app.include_router(wechat_callback_router.router)
 
 # 随镜像分发的静态资产（公众号二维码等）；公开可取，不走 API key。
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "app" / "static"), name="static")

@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     wechat_appsecret: str = ""
     wechat_api_base: str = "https://api.weixin.qq.com"
     wechat_token_cache_path: str = ".wechat_token.json"
+    # 公众号消息推送回调（微信开发者平台 → 公众号 → 基础信息 → 域名与消息推送配置）
+    # 回调 URL: https://<域名>/wechat/callback，消息加密选「安全模式」
+    wechat_callback_token: str = ""
+    wechat_aes_key: str = ""
     api_key: str = ""
     api_key_header: str = "X-API-Key"
 
@@ -22,8 +26,8 @@ class Settings(BaseSettings):
     # 留空则不落库（机器人仍可正常收发消息）
     database_url: str = ""
     cs_welcome_text: str = "您好，我是智能客服斐恩(Feyn)，请问有什么可以帮您？"
-    # 未关注公众号（取不到 unionid）的客户只收到引导关注的二维码，不接入 AI
-    cs_require_unionid: bool = True
+    # 未关注公众号的客户只收到引导关注的二维码，不接入 AI（判据取自公众号关注者名单）
+    cs_require_follow: bool = True
 
     # DeepSeek — 机器人回复所用 LLM
     deepseek_api_key: str = ""

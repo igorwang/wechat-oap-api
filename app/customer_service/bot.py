@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from ..config import settings
+from ..followers import FollowerDirectory, follower_directory
 from .client import CustomerServiceClient, customer_service_client
 from .prompts import FOLLOW_PROMPT, SYSTEM_PROMPT
 from .store import CustomerStore
@@ -30,13 +31,15 @@ class SupportBot:
         system_prompt: str | None = None,
         welcome_text: str | None = None,
         store: "CustomerStore | None" = None,
-        require_unionid: bool | None = None,
+        require_follow: bool | None = None,
+        followers: "FollowerDirectory | None" = None,
     ) -> None:
         self._client = client
         self.store = store
-        self._require_unionid = (
-            require_unionid if require_unionid is not None else settings.cs_require_unionid
+        self._require_follow = (
+            require_follow if require_follow is not None else settings.cs_require_follow
         )
+        self._followers = followers or follower_directory
         self._qr_media_id: str | None = None
         self._qr_media_at = 0.0
         self._api_key = api_key if api_key is not None else settings.deepseek_api_key
@@ -96,12 +99,25 @@ class SupportBot:
         except Exception:
             logger.exception("failed to persist customer %s", external_userid)
 
-    async def _lookup_unionid(self, external_userid: str, *, open_kfid: str = "") -> str | None:
-        """取客户 unionid：先读库，未命中再打接口并顺手落库.
+    async def _is_follower(self, external_userid: str, *, open_kfid: str = "") -> bool:
+        """客户当前是否关注了公众号.
 
-        unionid 只对已关注同主体公众号（或用过小程序）的客户下发，所以拿不到
-        就等同于"还没关注"。
+        unionid 只是把客服侧的客户和公众号侧的用户对上号——它本身判断不了关注
+        状态（会话本身就会分配 unionid，取关也不回收），真正的判据是这个 unionid
+        在不在公众号关注者名单里。
         """
+        unionid = await self._lookup_unionid(external_userid, open_kfid=open_kfid)
+        if not unionid:
+            return False
+        try:
+            return await self._followers.is_follower(unionid)
+        except Exception:
+            # 拉不到关注名单时按未关注拦下——放行会让门禁静默失效，比误拦难发现
+            logger.exception("failed to check follower status for %s", external_userid)
+            return False
+
+    async def _lookup_unionid(self, external_userid: str, *, open_kfid: str = "") -> str | None:
+        """取客户 unionid：先读库，未命中再打接口并顺手落库."""
         if self.store:
             try:
                 row = await self.store.get(external_userid)
@@ -112,7 +128,6 @@ class SupportBot:
         try:
             found = await self._client.get_customers([external_userid])
         except Exception:
-            # 查不到就当作未关注拦下——放行会让门禁静默失效，那才是更难发现的故障
             logger.exception("failed to fetch profile for %s", external_userid)
             return None
         if not found:
@@ -170,7 +185,7 @@ class SupportBot:
             open_kfid=msg.get("open_kfid", ""),
             bump_message_count=True,
         )
-        if self._require_unionid and not await self._lookup_unionid(
+        if self._require_follow and not await self._is_follower(
             msg["external_userid"], open_kfid=msg["open_kfid"]
         ):
             await self._send_follow_prompt(

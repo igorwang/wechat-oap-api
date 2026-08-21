@@ -42,6 +42,17 @@ class CallbackCrypto:
         if not hmac.compare_digest(expected, msg_signature):
             raise InvalidSignature("msg_signature mismatch")
 
+    def verify_plain_signature(self, signature: str, timestamp: str, nonce: str) -> None:
+        """公众号 URL 验证的签名：只由 token/timestamp/nonce 三者算出，不含 echostr.
+
+        企业微信那套（verify_url）把加密后的 echostr 也拌进签名并要求解密回显，
+        公众号不是——echostr 原样返回即可。
+        """
+        raw = "".join(sorted([self._token, timestamp, nonce]))
+        expected = hashlib.sha1(raw.encode()).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise InvalidSignature("signature mismatch")
+
     def verify_url(self, msg_signature: str, timestamp: str, nonce: str, echostr: str) -> str:
         """GET 回调校验：验签并返回解密后的 echostr 明文."""
         self._verify(msg_signature, timestamp, nonce, echostr)
