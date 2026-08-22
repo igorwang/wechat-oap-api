@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     dashscope_api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_vl_model: str = "qwen3-vl-flash"
     dashscope_asr_model: str = "qwen3-asr-flash"
+    # 语音识别语种；留空则由模型自动判别
+    dashscope_asr_language: str = "zh"
     # 日志落盘目录；留空则只打控制台。compose 里挂到 ./data/log
     log_dir: str = ""
     log_level: str = "INFO"

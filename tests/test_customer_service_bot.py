@@ -37,7 +37,19 @@ def client(tmp_path):
 
 
 @pytest.fixture
-def bot(client):
+def perception():
+    from app.customer_service.perception import Perception
+
+    return Perception(
+        api_key="dash-test-key",
+        api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        asr_model="qwen3-asr-flash",
+        vl_model="qwen3-vl-flash",
+    )
+
+
+@pytest.fixture
+def bot(client, perception):
     return SupportBot(
         client,
         api_key="ds-test-key",
@@ -45,6 +57,7 @@ def bot(client):
         model="deepseek-chat",
         system_prompt="你是客服",
         welcome_text="欢迎咨询",
+        perception=perception,
         # 关注门禁单独测（见文件末尾），这里只关心消息收发本身
         require_follow=False,
     )
@@ -208,12 +221,157 @@ async def test_non_customer_and_unsupported_messages_skipped(bot):
             # origin=4 系统消息（无 welcome_code 的事件）不回复
             {"msgid": "s1", "origin": 4, "msgtype": "event",
              "event": {"event_type": "msg_send_fail"}},
-            # 非文本消息暂不回复
-            {"msgid": "i1", "open_kfid": "wk1", "external_userid": "u1",
-             "origin": 3, "msgtype": "image", "image": {"media_id": "MID"}},
+            # 视频/文件/位置等仍不接待
+            {"msgid": "v1", "open_kfid": "wk1", "external_userid": "u1",
+             "origin": 3, "msgtype": "video", "video": {"media_id": "MID"}},
+            # origin=1 是客服自己发的，不能自问自答
+            {"msgid": "o1", "open_kfid": "wk1", "external_userid": "u1",
+             "origin": 1, "msgtype": "text", "text": {"content": "在的"}},
         ])
         handled = await bot.process_event(token="EVT", open_kfid="wk1")
         assert handled == 0
+
+
+# ---- 语音与图片 ----
+# 都走「先转成文字，再交给同一个大脑作答」：人设和不许编造的约束只有 SYSTEM_PROMPT
+# 一处。微信客服的语音是 AMR（sync_msg voice_format=0），qwen3-asr-flash 直接能读，
+# 不需要转码——这条是拿真的 AMR 语音打接口验过的。
+
+DASH = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+AMR_BYTES = b"#!AMR\n" + (b"\x04" + b"\x00" * 12) * 50
+JPEG_BYTES = b"\xff\xd8\xff\xe0fake"
+
+
+def _mock_media_get(mock, content, content_type):
+    return mock.get(f"{QY}/cgi-bin/media/get").mock(
+        return_value=httpx.Response(200, content=content, headers={"content-type": content_type})
+    )
+
+
+def _mock_dashscope(mock, content):
+    return mock.post(f"{DASH}/chat/completions").mock(
+        return_value=httpx.Response(
+            200, json={"choices": [{"message": {"role": "assistant", "content": content}}]}
+        )
+    )
+
+
+def _mock_deepseek(mock, content):
+    return mock.post(f"{DS}/chat/completions").mock(
+        return_value=httpx.Response(
+            200, json={"choices": [{"message": {"role": "assistant", "content": content}}]}
+        )
+    )
+
+
+def _voice_msg(media_id="VOICE_MID"):
+    return {"msgid": "vm1", "open_kfid": "wk1", "external_userid": "u1",
+            "origin": 3, "msgtype": "voice", "voice": {"media_id": media_id}}
+
+
+def _image_msg(media_id="IMG_MID"):
+    return {"msgid": "im1", "open_kfid": "wk1", "external_userid": "u1",
+            "origin": 3, "msgtype": "image", "image": {"media_id": media_id}}
+
+
+async def test_voice_message_is_transcribed_then_answered(bot):
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_voice_msg()])
+        media = _mock_media_get(mock, AMR_BYTES, "audio/amr")
+        asr = _mock_dashscope(mock, "你们的退货政策是怎么样的")
+        ds = _mock_deepseek(mock, "七天无理由退货")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+
+        assert media.calls.last.request.url.params["media_id"] == "VOICE_MID"
+        assert asr.called
+        # 转写结果原样作为客户的话交给大脑，不加任何转述
+        ds_req = json.loads(ds.calls.last.request.content)
+        assert ds_req["messages"][-1] == {"role": "user", "content": "你们的退货政策是怎么样的"}
+        assert json.loads(send.calls.last.request.content)["text"]["content"] == "七天无理由退货"
+
+
+async def test_image_message_is_described_then_answered(bot):
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_image_msg()])
+        media = _mock_media_get(mock, JPEG_BYTES, "image/jpeg")
+        vl = _mock_dashscope(mock, "一张订单截图，订单号 20260821，状态『已发货』")
+        ds = _mock_deepseek(mock, "您的订单已经发出了")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+
+        assert media.calls.last.request.url.params["media_id"] == "IMG_MID"
+        assert json.loads(vl.calls.last.request.content)["model"] == "qwen3-vl-flash"
+        # DeepSeek 看不见图，必须明确告诉它这段文字是图片内容而不是客户原话
+        asked = json.loads(ds.calls.last.request.content)["messages"][-1]["content"]
+        assert "订单号 20260821" in asked
+        assert "图片" in asked
+        assert json.loads(send.calls.last.request.content)["text"]["content"] == "您的订单已经发出了"
+
+
+async def test_octet_stream_image_is_typed_from_its_bytes(bot):
+    """微信有时把图片回成 application/octet-stream，百炼只认 png/jpeg/webp."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_image_msg()])
+        _mock_media_get(mock, b"\x89PNG\r\n\x1a\n" + b"body", "application/octet-stream")
+        vl = _mock_dashscope(mock, "一张图")
+        _mock_deepseek(mock, "好的")
+        mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        await bot.process_event(token="EVT", open_kfid="wk1")
+
+        parts = json.loads(vl.calls.last.request.content)["messages"][0]["content"]
+        image = next(p for p in parts if p["type"] == "image_url")
+        assert image["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+async def test_unrecognisable_media_gets_a_reply_not_silence(bot):
+    """识别失败也得出声，否则客户对着空气等."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_voice_msg()])
+        _mock_media_get(mock, AMR_BYTES, "audio/amr")
+        mock.post(f"{DASH}/chat/completions").mock(
+            return_value=httpx.Response(500, json={"message": "internal error"})
+        )
+        ds = mock.post(f"{DS}/chat/completions")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+
+        assert not ds.called, "没识别出内容就不该拿空话去问大脑"
+        assert "文字" in json.loads(send.calls.last.request.content)["text"]["content"]
+
+
+async def test_oversized_image_is_not_sent_to_the_model(bot):
+    """百炼单个媒体上限 10MB，超了直接请客户改用文字，别白挨一个 400."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_image_msg()])
+        _mock_media_get(mock, b"\xff\xd8\xff" + b"x" * (10 * 1024 * 1024), "image/jpeg")
+        vl = mock.post(f"{DASH}/chat/completions")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+
+        assert not vl.called
+        assert "文字" in json.loads(send.calls.last.request.content)["text"]["content"]
 
 
 # ---- 关注公众号门禁 ----
@@ -253,10 +411,10 @@ def _mock_oa(mock, *, follower_unionids):
     ] * 4)
 
 
-def _gated_bot(client, followers, store=None):
+def _gated_bot(client, followers, store=None, perception=None):
     return SupportBot(
         client, api_key="k", api_base=DS, system_prompt="你是客服",
-        store=store, require_follow=True, followers=followers,
+        store=store, require_follow=True, followers=followers, perception=perception,
     )
 
 
@@ -376,3 +534,51 @@ async def test_qrcode_media_id_is_reused_across_messages(client, followers):
 
         assert await _gated_bot(client, followers).process_event(token="EVT", open_kfid="wk1") == 2
         assert upload.call_count == 1
+
+
+async def test_gate_blocks_before_any_recognition_is_paid_for(client, followers, perception):
+    """未关注的客户发语音，不该先花一次 ASR 再拦——门禁必须跑在识别之前."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_voice_msg()])
+        _mock_kf_customer(mock, "u_stranger")
+        _mock_oa(mock, follower_unionids=[])
+        media = mock.get(f"{QY}/cgi-bin/media/get")
+        dash = mock.post(f"{DASH}/chat/completions")
+        mock.post(f"{QY}/cgi-bin/media/upload").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "media_id": "QR_MID"})
+        )
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        handled = await _gated_bot(client, followers, perception=perception).process_event(
+            token="EVT", open_kfid="wk1"
+        )
+
+        assert handled == 1
+        assert not media.called, "拦下的客户不该下载媒体"
+        assert not dash.called, "拦下的客户不该消耗识别调用"
+        assert [json.loads(c.request.content)["msgtype"] for c in send.calls] == ["text", "image"]
+
+
+async def test_follower_sending_a_voice_message_reaches_the_llm(client, followers, perception):
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_voice_msg()])
+        _mock_kf_customer(mock, "u_fan")
+        _mock_oa(mock, follower_unionids=["u_fan"])
+        _mock_media_get(mock, AMR_BYTES, "audio/amr")
+        _mock_dashscope(mock, "我想查一下物流")
+        ds = _mock_deepseek(mock, "麻烦提供一下订单号")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        handled = await _gated_bot(client, followers, perception=perception).process_event(
+            token="EVT", open_kfid="wk1"
+        )
+
+        assert handled == 1
+        assert json.loads(ds.calls.last.request.content)["messages"][-1]["content"] == "我想查一下物流"
+        assert json.loads(send.calls.last.request.content)["text"]["content"] == "麻烦提供一下订单号"

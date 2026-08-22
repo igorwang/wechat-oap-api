@@ -10,7 +10,13 @@ import httpx
 from ..config import settings
 from ..followers import FollowerDirectory, follower_directory
 from .client import CustomerServiceClient, customer_service_client
-from .prompts import FOLLOW_PROMPT, SYSTEM_PROMPT
+from .perception import Perception
+from .prompts import (
+    FOLLOW_PROMPT,
+    IMAGE_CONTEXT_TEMPLATE,
+    MEDIA_FALLBACK_TEXT,
+    SYSTEM_PROMPT,
+)
 from .store import CustomerStore
 
 logger = logging.getLogger(__name__)
@@ -18,6 +24,32 @@ logger = logging.getLogger(__name__)
 _QR_PATH = Path(__file__).resolve().parent.parent / "static" / "qrcode-official-account.jpg"
 # 微信临时素材 3 天失效，留一天余量
 _QR_MEDIA_TTL = 2 * 24 * 3600
+# 客户发来的、会被接待的消息类型；其余（视频/文件/位置/名片…）暂不处理
+_SUPPORTED_MSGTYPES = ("text", "voice", "image")
+# 百炼单个媒体上限 10MB。微信语音最长 60 秒（AMR 约 90KB），只有图片可能撞线
+_MAX_MEDIA_BYTES = 10 * 1024 * 1024
+_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF8", "image/gif"),
+)
+
+
+def _image_mime(data: bytes, content_type: str) -> str:
+    """认出图片真实类型.
+
+    微信 media/get 有时回 application/octet-stream，而百炼只认 png/jpeg/webp，
+    标错会被拒，所以 header 不可信时自己看字节头。
+    """
+    kind = content_type.split(";")[0].strip().lower()
+    if kind.startswith("image/"):
+        return kind
+    for magic, mime in _IMAGE_MAGIC:
+        if data.startswith(magic):
+            return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
 
 
 class SupportBot:
@@ -33,9 +65,11 @@ class SupportBot:
         store: "CustomerStore | None" = None,
         require_follow: bool | None = None,
         followers: "FollowerDirectory | None" = None,
+        perception: "Perception | None" = None,
     ) -> None:
         self._client = client
         self.store = store
+        self._perception = perception or Perception()
         self._require_follow = (
             require_follow if require_follow is not None else settings.cs_require_follow
         )
@@ -184,34 +218,87 @@ class SupportBot:
                 return True
             return False
         # 3 = 客户发送的消息
-        if msg.get("origin") != 3 or msgtype != "text":
+        if msg.get("origin") != 3 or msgtype not in _SUPPORTED_MSGTYPES:
             logger.info(
-                "跳过消息 msgid=%s origin=%s type=%s（只处理客户发来的文本）",
+                "跳过消息 msgid=%s origin=%s type=%s（只接待客户发来的文字/语音/图片）",
                 msg.get("msgid"), msg.get("origin"), msgtype,
             )
             return False
         external_userid = msg["external_userid"]
-        content = msg["text"]["content"]
-        logger.info("💬 收到消息 from=%s content=%r", external_userid, content[:100])
+        open_kfid = msg["open_kfid"]
         await self._record(
-            msg.get("external_userid", ""),
-            open_kfid=msg.get("open_kfid", ""),
-            bump_message_count=True,
+            external_userid, open_kfid=open_kfid, bump_message_count=True
         )
+        # 门禁必须在识别之前：未关注的客户不该花掉一次 ASR/视觉调用
         if self._require_follow and not await self._is_follower(
-            external_userid, open_kfid=msg["open_kfid"]
+            external_userid, open_kfid=open_kfid
         ):
             logger.info("🚧 门禁拦下（未关注公众号）from=%s，发送引导二维码", external_userid)
-            await self._send_follow_prompt(
-                touser=external_userid, open_kfid=msg["open_kfid"]
+            await self._send_follow_prompt(touser=external_userid, open_kfid=open_kfid)
+            return True
+        content = await self._to_text(msg, external_userid=external_userid)
+        if not content:
+            # 识别不出内容也要出声，否则客户对着空气等
+            await self._client.send_text(
+                touser=external_userid, open_kfid=open_kfid, content=MEDIA_FALLBACK_TEXT
             )
             return True
         answer = await self.reply(content)
         logger.info("🤖 已回复 to=%s content=%r", external_userid, answer[:100])
         await self._client.send_text(
-            touser=external_userid, open_kfid=msg["open_kfid"], content=answer
+            touser=external_userid, open_kfid=open_kfid, content=answer
         )
         return True
+
+    async def _to_text(self, msg: dict[str, Any], *, external_userid: str) -> str:
+        """把客户发来的消息变成一段交给大脑的文本；识别不出来返回空串.
+
+        语音转写后原样当成客户说的话；图片先让视觉模型客观描述，再包一层转述，
+        因为 DeepSeek 看不见图，得知道这段文字是图片内容而不是客户的原话。
+        """
+        msgtype = msg["msgtype"]
+        if msgtype == "text":
+            content = msg["text"]["content"]
+            logger.info("💬 收到消息 from=%s content=%r", external_userid, content[:100])
+            return content
+
+        is_voice = msgtype == "voice"
+        kind = "语音" if is_voice else "图片"
+        media_id = (msg.get(msgtype) or {}).get("media_id", "")
+        logger.info(
+            "%s 收到%s from=%s media_id=%s", "🎤" if is_voice else "🖼️",
+            kind, external_userid, media_id,
+        )
+        if not media_id:
+            logger.warning("%s消息没有 media_id msgid=%s", kind, msg.get("msgid"))
+            return ""
+        try:
+            data, content_type = await self._client.get_media(media_id)
+        except Exception:
+            logger.exception("下载%s失败 media_id=%s", kind, media_id)
+            return ""
+        if len(data) > _MAX_MEDIA_BYTES:
+            logger.warning(
+                "%s %d 字节，超过百炼 %dMB 上限，不送模型",
+                kind, len(data), _MAX_MEDIA_BYTES // 1024 // 1024,
+            )
+            return ""
+        try:
+            if is_voice:
+                # sync_msg 用 voice_format=0 拉的就是 AMR，百炼直接能读，无需转码
+                text = (await self._perception.transcribe(data, mime="audio/amr")).strip()
+                logger.info("📝 语音转写 from=%s text=%r", external_userid, text[:100])
+                return text
+            described = (
+                await self._perception.describe_image(
+                    data, mime=_image_mime(data, content_type)
+                )
+            ).strip()
+            logger.info("👁️ 图片识别 from=%s desc=%r", external_userid, described[:150])
+            return IMAGE_CONTEXT_TEMPLATE.format(description=described) if described else ""
+        except Exception:
+            logger.exception("%s识别失败 media_id=%s", kind, media_id)
+            return ""
 
     async def process_event(self, *, token: str = "", open_kfid: str = "") -> int:
         """处理一次 kf_msg_or_event 回调：拉取新消息并逐条响应，返回已处理条数.
