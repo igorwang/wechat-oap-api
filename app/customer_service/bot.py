@@ -1,7 +1,9 @@
 """客服机器人编排：回调事件 → sync_msg 拉取 → DeepSeek 生成回复 → send_msg 下发."""
 
+import asyncio
 import logging
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ from .prompts import (
     IMAGE_CONTEXT_TEMPLATE,
     MEDIA_FALLBACK_TEXT,
     SYSTEM_PROMPT,
+    UNSUPPORTED_MEDIA_TEXT,
 )
 from .store import CustomerStore
 
@@ -24,8 +27,11 @@ logger = logging.getLogger(__name__)
 _QR_PATH = Path(__file__).resolve().parent.parent / "static" / "qrcode-official-account.jpg"
 # 微信临时素材 3 天失效，留一天余量
 _QR_MEDIA_TTL = 2 * 24 * 3600
-# 客户发来的、会被接待的消息类型；其余（视频/文件/位置/名片…）暂不处理
+# 客户发来的、会被接待的消息类型；其余（视频/文件/位置/名片…）只回一句说明
 _SUPPORTED_MSGTYPES = ("text", "voice", "image")
+# 记住最近处理过的 msgid 用于判重。一次 sync 最多几十条，两千条足够覆盖
+# 回调重推的时间窗；再多就是历史了，那时 cursor 早已推进
+_DEDUP_CAPACITY = 2000
 # 百炼单个媒体上限 10MB。微信语音最长 60 秒（AMR 约 90KB），只有图片可能撞线
 _MAX_MEDIA_BYTES = 10 * 1024 * 1024
 _IMAGE_MAGIC = (
@@ -70,6 +76,11 @@ class SupportBot:
         self._client = client
         self.store = store
         self._perception = perception or Perception()
+        # 回调重推 + 每次回调都从 cursor 重新 sync = 同一条消息会被投递多次
+        self._seen_msgids: set[str] = set()
+        self._seen_order: deque[str] = deque()
+        # 串行化整个「拉取 + 处理」，否则并发的两次回调会读到同一个 cursor
+        self._event_lock = asyncio.Lock()
         self._require_follow = (
             require_follow if require_follow is not None else settings.cs_require_follow
         )
@@ -196,7 +207,27 @@ class SupportBot:
         if media_id:
             await self._client.send_image(touser=touser, open_kfid=open_kfid, media_id=media_id)
 
+    def _is_duplicate(self, msgid: str) -> bool:
+        """这条 msgid 是否已经处理过；顺手记下.
+
+        标记发生在派发时而不是完成后——和 cursor 一样是「取出即消费」：处理到
+        一半失败就算了，也不要因为重试把客户的消息回两遍。
+        没有 msgid 的消息无法判重，一律放行，宁可多回一次也不能漏。
+        """
+        if not msgid:
+            return False
+        if msgid in self._seen_msgids:
+            return True
+        self._seen_msgids.add(msgid)
+        self._seen_order.append(msgid)
+        while len(self._seen_order) > _DEDUP_CAPACITY:
+            self._seen_msgids.discard(self._seen_order.popleft())
+        return False
+
     async def _handle(self, msg: dict[str, Any]) -> bool:
+        if self._is_duplicate(msg.get("msgid", "")):
+            logger.info("↩️ 跳过重复投递 msgid=%s", msg.get("msgid"))
+            return False
         msgtype = msg.get("msgtype")
         if msgtype == "event":
             event = msg.get("event", {})
@@ -217,10 +248,10 @@ class SupportBot:
                 await self._client.send_welcome(code=code, content=self._welcome_text)
                 return True
             return False
-        # 3 = 客户发送的消息
-        if msg.get("origin") != 3 or msgtype not in _SUPPORTED_MSGTYPES:
+        # 3 = 客户发来的消息；其余是系统事件或客服自己发的，回它就成了自问自答
+        if msg.get("origin") != 3:
             logger.info(
-                "跳过消息 msgid=%s origin=%s type=%s（只接待客户发来的文字/语音/图片）",
+                "跳过消息 msgid=%s origin=%s type=%s（不是客户发来的）",
                 msg.get("msgid"), msg.get("origin"), msgtype,
             )
             return False
@@ -235,6 +266,15 @@ class SupportBot:
         ):
             logger.info("🚧 门禁拦下（未关注公众号）from=%s，发送引导二维码", external_userid)
             await self._send_follow_prompt(touser=external_userid, open_kfid=open_kfid)
+            return True
+        if msgtype not in _SUPPORTED_MSGTYPES:
+            logger.info(
+                "📎 接不住的类型 msgid=%s type=%s from=%s，告知支持范围",
+                msg.get("msgid"), msgtype, external_userid,
+            )
+            await self._client.send_text(
+                touser=external_userid, open_kfid=open_kfid, content=UNSUPPORTED_MEDIA_TEXT
+            )
             return True
         content = await self._to_text(msg, external_userid=external_userid)
         if not content:
@@ -305,22 +345,26 @@ class SupportBot:
 
         跑在 BackgroundTask 里，响应此时已发出，抛异常只会变成一句无用的
         "response already started" —— 所以这里必须自己消化掉所有错误。
+
+        整段串行执行：微信 5 秒收不到响应就重推回调，而每次回调都从存下的
+        cursor 重新拉取，并发跑会让两次拉取读到同一个 cursor、拿到同一批消息。
         """
-        try:
-            messages = await self._client.sync_msg(token=token, open_kfid=open_kfid)
-        except Exception:
-            logger.exception("sync_msg failed (open_kfid=%s)", open_kfid)
-            return 0
-        if messages:
-            logger.info("拉取到 %d 条新消息 open_kfid=%s", len(messages), open_kfid)
-        handled = 0
-        for msg in messages:
+        async with self._event_lock:
             try:
-                if await self._handle(msg):
-                    handled += 1
+                messages = await self._client.sync_msg(token=token, open_kfid=open_kfid)
             except Exception:
-                logger.exception("failed to handle message %s", msg.get("msgid"))
-        return handled
+                logger.exception("sync_msg failed (open_kfid=%s)", open_kfid)
+                return 0
+            if messages:
+                logger.info("拉取到 %d 条新消息 open_kfid=%s", len(messages), open_kfid)
+            handled = 0
+            for msg in messages:
+                try:
+                    if await self._handle(msg):
+                        handled += 1
+                except Exception:
+                    logger.exception("failed to handle message %s", msg.get("msgid"))
+            return handled
 
 
 support_bot = SupportBot(customer_service_client)

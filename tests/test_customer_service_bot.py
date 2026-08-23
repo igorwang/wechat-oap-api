@@ -582,3 +582,153 @@ async def test_follower_sending_a_voice_message_reaches_the_llm(client, follower
         assert handled == 1
         assert json.loads(ds.calls.last.request.content)["messages"][-1]["content"] == "我想查一下物流"
         assert json.loads(send.calls.last.request.content)["text"]["content"] == "麻烦提供一下订单号"
+
+
+# ---- 重复投递 ----
+# 微信回调 5 秒内没响应就会重推，而每次回调都从存下的 cursor 重新 sync_msg。
+# 两个回调并发进来会各自读到同一个 cursor、拉到同一批消息，同一条消息回两遍。
+
+
+async def test_the_same_message_is_never_answered_twice(bot):
+    """回调重推时 sync_msg 会把同一条消息再吐一次，不能重复作答."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_customer_msg("怎么退货？", "m1")])
+        ds = _mock_deepseek(mock, "七天无理由退货")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        first = await bot.process_event(token="EVT", open_kfid="wk1")
+        second = await bot.process_event(token="EVT2", open_kfid="wk1")
+
+        assert (first, second) == (1, 0)
+        assert ds.call_count == 1
+        assert send.call_count == 1
+
+
+async def test_concurrent_callbacks_answer_each_message_once(bot):
+    """两个回调同时进来，各自 sync 到同一批消息——客户只该收到一份回复."""
+    import asyncio
+
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_customer_msg("在吗", "m1"), _customer_msg("有人吗", "m2")])
+        _mock_deepseek(mock, "在的")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        handled = await asyncio.gather(
+            bot.process_event(token="EVT", open_kfid="wk1"),
+            bot.process_event(token="EVT", open_kfid="wk1"),
+        )
+
+        assert sum(handled) == 2, "两条消息各处理一次"
+        assert send.call_count == 2
+
+
+async def test_duplicate_enter_session_does_not_greet_twice(bot):
+    """欢迎语重复发比重复作答更刺眼."""
+    event = {"msgid": "e1", "open_kfid": "wk1", "external_userid": "u1",
+             "origin": 4, "msgtype": "event",
+             "event": {"event_type": "enter_session", "open_kfid": "wk1",
+                       "external_userid": "u1", "welcome_code": "WC1"}}
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [event])
+        welcome = mock.post(f"{QY}/cgi-bin/kf/send_msg_on_event").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "w1"})
+        )
+
+        await bot.process_event(token="EVT", open_kfid="wk1")
+        await bot.process_event(token="EVT", open_kfid="wk1")
+
+        assert welcome.call_count == 1
+
+
+async def test_messages_without_msgid_are_still_answered(bot):
+    """去重不能反过来吞消息：没有 msgid 就没法判重，宁可回也不能漏."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        no_id = _customer_msg("在吗", "m1")
+        del no_id["msgid"]
+        _mock_sync(mock, [no_id])
+        _mock_deepseek(mock, "在的")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+        assert send.call_count == 2
+
+
+# ---- 不接待的消息类型 ----
+# 客户发来视频/文件/位置时，静默跳过等于机器人装死；回一句说明能接住的类型，
+# 客户就知道换个方式发。系统消息和客服自己发的消息仍然不回。
+
+
+async def test_video_from_a_customer_gets_told_what_is_supported(bot):
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [{
+            "msgid": "vd1", "open_kfid": "wk1", "external_userid": "u1",
+            "origin": 3, "msgtype": "video", "video": {"media_id": "MID"},
+        }])
+        ds = mock.post(f"{DS}/chat/completions")
+        media = mock.get(f"{QY}/cgi-bin/media/get")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+
+        assert not ds.called, "不接待的类型不该问大脑"
+        assert not media.called, "不接待的类型不该下载媒体"
+        replied = json.loads(send.calls.last.request.content)["text"]["content"]
+        assert "文字" in replied and "图片" in replied and "语音" in replied
+
+
+async def test_system_and_servicer_messages_stay_silent(bot):
+    """origin 不是 3 的消息不是客户发的，回它等于自问自答."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [
+            {"msgid": "s1", "origin": 4, "msgtype": "event",
+             "event": {"event_type": "msg_send_fail"}},
+            {"msgid": "o1", "open_kfid": "wk1", "external_userid": "u1",
+             "origin": 1, "msgtype": "text", "text": {"content": "在的"}},
+            {"msgid": "o2", "open_kfid": "wk1", "external_userid": "u1",
+             "origin": 4, "msgtype": "video", "video": {"media_id": "MID"}},
+        ])
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg")
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 0
+        assert not send.called
+
+
+async def test_unsupported_type_from_a_non_follower_still_hits_the_gate(client, followers, perception):
+    """先过门禁再谈类型，不然未关注的人也能摸到服务的边界."""
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [{
+            "msgid": "vd1", "open_kfid": "wk1", "external_userid": "u1",
+            "origin": 3, "msgtype": "video", "video": {"media_id": "MID"},
+        }])
+        _mock_kf_customer(mock, "u_stranger")
+        _mock_oa(mock, follower_unionids=[])
+        mock.post(f"{QY}/cgi-bin/media/upload").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "media_id": "QR_MID"})
+        )
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        await _gated_bot(client, followers, perception=perception).process_event(
+            token="EVT", open_kfid="wk1"
+        )
+
+        assert [json.loads(c.request.content)["msgtype"] for c in send.calls] == ["text", "image"]
+        first = json.loads(send.calls[0].request.content)["text"]["content"]
+        assert "关注公众号" in first, "应该是引导关注，而不是告诉他支持哪些类型"

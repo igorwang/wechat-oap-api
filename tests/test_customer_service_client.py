@@ -200,3 +200,29 @@ async def test_send_welcome_on_event(client):
             "msgtype": "text",
             "text": {"content": "欢迎咨询"},
         }
+
+
+async def test_unwritable_cursor_path_is_loud_not_silent(tmp_path, caplog):
+    """cursor 存不下就会每次回调都从头重放旧消息——这种事绝不能悄无声息."""
+    import logging
+
+    readonly = tmp_path / "readonly"
+    readonly.mkdir()
+    readonly.chmod(0o500)
+    blocked = CustomerServiceClient(
+        corpid="c", secret="s", base_url=BASE, cursor_path=str(readonly / "cursor.json")
+    )
+    async with respx.mock(base_url=BASE) as mock:
+        _mock_token(mock)
+        mock.post("/cgi-bin/kf/sync_msg").mock(
+            return_value=httpx.Response(
+                200, json={"errcode": 0, "next_cursor": "CUR1", "has_more": 0, "msg_list": []}
+            )
+        )
+        try:
+            with caplog.at_level(logging.WARNING):
+                await blocked.sync_msg()          # 不抛：拉消息本身是成功的
+        finally:
+            readonly.chmod(0o700)
+
+    assert any("cursor" in r.message.lower() for r in caplog.records), caplog.text

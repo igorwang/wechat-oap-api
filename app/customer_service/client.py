@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,8 @@ import httpx
 from fastapi import HTTPException
 
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class CustomerServiceClient:
@@ -89,8 +92,14 @@ class CustomerServiceClient:
             return
         try:
             self._cursor_path.write_text(json.dumps({"cursor": cursor}))
-        except OSError:
-            pass
+        except OSError as exc:
+            # 存不下就意味着重启后从头重放旧消息，把客户的老问题再答一遍。
+            # 拉消息本身是成功的，不该因此抛错，但绝不能悄无声息。
+            logger.warning(
+                "sync_msg cursor 写入 %s 失败(%s)，重启后会重复拉取旧消息。"
+                "容器内用户是 uid 10001，宿主机执行 chown 10001:10001 %s 可修复",
+                self._cursor_path, exc, self._cursor_path.parent,
+            )
 
     # ---------------- messaging ----------------
 
