@@ -3,9 +3,9 @@
 微信公众号（订阅号 / 服务号）服务端 API 的 FastAPI 封装，同时通过 MCP 对 AI Agent 暴露。
 Token 自动缓存、鉴权内置、一条 `docker compose up` 即可部署。
 
-- **HTTP 接口**覆盖基础能力、发布、草稿、素材、消息，以及微信客服与回调
+- **HTTP 接口**覆盖基础能力、发布、草稿、素材、文章运营统计、消息，以及微信客服与回调
 - **Access Token 自动管理**：内部使用稳定版 Token，asyncio 锁去重 + 文件持久化 + 40001/42001 一次恢复重试
-- **MCP 暴露（故意收窄）**：只有 **草稿 + 素材 + healthz 共 18 个** tool 走 MCP；发布、群发、订阅消息等保留为 HTTP-only，避免 Agent 误触发。见 `main.py` 里的 `MCP_TOOLS` 白名单
+- **MCP 共 24 个工具**：草稿、素材、healthz，加上已发表文章列表／正文查询与四个只读运营统计工具。正式发布、删除已发表文章、群发和订阅消息保留为 HTTP-only。见 `main.py` 的 `MCP_TOOLS` 白名单
 - **API Key 鉴权**：保护 `/wechat/*` 与 `/mcp`，可关
 - **离线测试**：httpx + respx + pytest-asyncio；运行结果以本次检查为准
 
@@ -215,7 +215,7 @@ python3 skills/wechat-api/scripts/check.py skills/wechat-api/examples/editorial-
 bash skills/wechat-api/scripts/ai-voice-check.sh skills/wechat-api/examples/editorial-article.md
 ```
 
-MCP 仍只暴露草稿、素材与健康检查。正式发布、群发和订阅消息保留 HTTP 接口，由使用者按自己的授权流程操作。
+MCP 同时支持只读文章运营，使用方法见技能的[文章运营指南](skills/wechat-api/references/article-operations.md)。正式发布、群发和订阅消息保留 HTTP 接口，由使用者按自己的授权流程操作。
 
 ---
 
@@ -225,11 +225,29 @@ MCP 仍只暴露草稿、素材与健康检查。正式发布、群发和订阅�
 |---|---|---|---:|
 | 基础接口 | `/wechat/{token,stable-token,callback/check,api-domain-ip,callback-ip,clear-quota}` | — | 6 |
 | 发布能力 | `/wechat/freepublish/*` | `freepublish_*` | 5 |
+| 文章运营 | `/wechat/analytics/*` | `analytics_*` | 4 |
 | 草稿管理 | `/wechat/draft/*` | `draft_*` | 8 |
 | 素材管理 | `/wechat/material/{permanent,temporary}/*` | `material_*` | 9 |
 | 基础消息 | `/wechat/message/{mass,subscribe,autoreply}/*` | `message_*` | 9 |
 
 完整 schema 见 http://localhost:8000/docs 。
+
+### 文章运营（HTTP 与 MCP）
+
+| HTTP POST 路径 | MCP 工具 | 官方接口／日期口径 |
+|---|---|---|
+| `/wechat/analytics/article-read` | `analytics_article_read` | `getarticleread`，单日统计日期，逐篇阅读人数与来源 |
+| `/wechat/analytics/article-share` | `analytics_article_share` | `getarticleshare`，单日统计日期，逐篇分享人数 |
+| `/wechat/analytics/account-summary` | `analytics_account_summary` | `getbizsummary`，统计日期区间，含首尾最多 30 天 |
+| `/wechat/analytics/article-details` | `analytics_article_details` | `getarticletotaldetail`，单日**发表日期**，含标题、链接和阅读质量 |
+
+请求统一为 `{"begin_date":"2026-11-01","end_date":"2026-11-01"}`。本地校验日期格式、有效日历、起止顺序、跨度、最早 `2025-11-01`、最晚北京时间昨日；非法请求返回 422，不调用微信。建议次日 8 点后查询昨日数据。
+
+四个统计接口均要求企业主体已认证账号；新增封装不会改变账号权限。返回微信原始 JSON，保留指标、`is_delay`（布尔值或文档示例字符串）、空列表及 `48001` 等错误。阅读／分享为**人数**；单篇详情 `detail_list` 是发表日至各统计日的累计，单篇跟踪发表起 30 天，多条累计记录不可相加。
+
+已发表文章列表和正文继续使用 `/wechat/freepublish/batchget`、`/wechat/freepublish/getarticle`，现在也通过 MCP 的 `freepublish_batchget`、`freepublish_getarticle` 开放查询。它们返回的 `article_id` 与统计的 `msgid`、草稿的 `media_id` 应分别使用。
+
+官方支持范围及来源见[统计接口调研](docs/wechat-analytics-support-20261104.md)。以上为代码支持，服务升级部署和真实账号权限需分别核实。
 
 ### 腾讯 API 核查与兼容
 
@@ -256,6 +274,7 @@ app/
 ├── auth.py            # X-API-Key 中间件
 └── routers/
     ├── freepublish.py
+    ├── analytics.py
     ├── draft.py
     ├── material.py
     └── message.py

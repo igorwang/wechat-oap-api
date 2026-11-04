@@ -17,6 +17,7 @@ from app.follower_store import FollowerStore
 from app.followers import follower_directory
 from app.db import init_database
 from app.routers import customer_service as customer_service_router
+from app.routers import analytics as analytics_router
 from app.routers import wechat_callback as wechat_callback_router
 from app.routers import draft as draft_router
 from app.routers import freepublish as freepublish_router
@@ -44,7 +45,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="WeChat OAP API",
-    description="FastAPI wrapper for WeChat 订阅号 基础接口 with MCP support.",
+    description="WeChat 公众号／服务号草稿、素材、文章运营及基础接口，支持 MCP。",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -111,6 +112,7 @@ async def clear_quota(body: ClearQuotaBody) -> dict[str, Any]:
 
 
 app.include_router(freepublish_router.router)
+app.include_router(analytics_router.router)
 app.include_router(draft_router.router)
 app.include_router(material_router.router)
 app.include_router(message_router.router)
@@ -121,11 +123,9 @@ app.include_router(wechat_callback_router.router)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "app" / "static"), name="static")
 
 
-# MCP exposes a DELIBERATELY NARROW subset — only what's needed to build and
-# inspect drafts + upload the media they reference. Publishing (freepublish_*)
-# and messaging (message_*) stay reachable via the HTTP routes (/docs) but are
-# NOT exposed to agents, to keep the agent-visible tool surface aligned with
-# the intended "compose drafts; I'll publish by hand" workflow.
+# MCP covers draft composition, media and read-only article operations.
+# Publication/deletion of published articles and messaging stay HTTP-only;
+# the user continues to publish manually in the WeChat admin UI.
 MCP_TOOLS = [
     # sanity-check
     "healthz",
@@ -148,12 +148,20 @@ MCP_TOOLS = [
     "material_temp_upload",
     "material_temp_get",
     "material_temp_get_jssdk",
+    # published content inspection (no submit/delete)
+    "freepublish_batchget",
+    "freepublish_getarticle",
+    # read-only article operations
+    "analytics_article_read",
+    "analytics_article_share",
+    "analytics_account_summary",
+    "analytics_article_details",
 ]
 
 mcp = FastApiMCP(
     app,
     name="wechat-oap-mcp",
-    description="WeChat 公众号 草稿 & 素材 exposed as MCP tools.",
+    description="WeChat 公众号草稿、素材、已发表文章查询与运营统计 MCP tools.",
     include_operations=MCP_TOOLS,
     # Forward the API key header from incoming MCP requests into internal tool calls
     # so they pass our middleware (otherwise 401 on every tool invocation).

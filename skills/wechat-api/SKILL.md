@@ -1,11 +1,11 @@
 ---
 name: wechat-api
-description: Use when writing or revising Chinese WeChat Official Account articles, applying SurviAGI editorial templates, converting Markdown to 公众号 HTML, or managing drafts and media through wechat-oap MCP or authenticated HTTP. Publishing and mass messaging are outside this skill.
+description: Use when writing, formatting or managing WeChat Official Account drafts and media, reading published articles, or querying article readership, sharing and operational statistics through wechat-oap MCP or authenticated HTTP. Publishing and mass messaging are outside this skill.
 ---
 
-# wechat-api — 公众号 drafts (MD → HTML → draft)
+# wechat-api — 公众号写作、草稿与文章运营
 
-Scope: **write or revise an article when requested, format it, and save a WeChat 公众号 draft**, plus manage its materials. Existing prose is preserved when only formatting is requested. The user reviews and publishes from the 公众号 admin UI themselves.
+Scope: **write, format and save a WeChat 公众号 draft, manage its materials, and read published content and operational statistics**. Existing prose is preserved when only formatting is requested. The user reviews and publishes from the 公众号 admin UI themselves.
 
 All relative commands below run from this skill directory; article paths may be absolute. Local writing and rendering need no account or API key.
 
@@ -24,7 +24,7 @@ All relative commands below run from this skill directory; article paths may be 
 
 | 用途 | 路径 | 原因 |
 |---|---|---|
-| JSON-body 操作（`draft_*`, `material_get/count/batchget/delete`, `healthz`） | **MCP** 服务名 `wechat-oap` | Claude Code MCP 客户端对 JSON 请求支持完整 |
+| JSON-body 操作（草稿、素材查询、已发表文章查询、`analytics_*`、健康检查） | **MCP** 服务名 `wechat-oap` | Claude Code MCP 客户端对 JSON 请求支持完整 |
 | Multipart 文件上传（封面、正文图、视频、语音） | **HTTP + `scripts/wechat.sh`** | MCP 客户端不能可靠透传 file 字段，调 `material_add` 会 422 "media field required" |
 | MD → HTML 转换 / 占位符替换 / 视频 merge / 草稿修复 | **Node 脚本** `scripts/md2wechat.mjs` 等 | 纯本地文本变换，不需要 API |
 
@@ -37,6 +37,18 @@ All relative commands below run from this skill directory; article paths may be 
 客户端统一使用 `WECHAT_API_KEY`，值应与服务端 `API_KEY` 一致。HTTP 脚本兼容旧名 `WECHAT_OAP_API_KEY`，新名优先；仓库 MCP 配置已改用新名，旧客户端需迁移环境变量后重载。
 
 ## Tool catalog
+
+### 文章运营（只读 MCP／HTTP）
+
+查询已发表文章或阅读、分享、点赞等数据时，先读[文章运营指南](references/article-operations.md)。新增统计工具：
+
+- `analytics_article_read(begin_date, end_date)` — 单个统计日期的逐篇阅读人数与来源。
+- `analytics_article_share(begin_date, end_date)` — 单个统计日期的逐篇分享人数。
+- `analytics_account_summary(begin_date, end_date)` — 账号每日概况，含首尾最多 30 天。
+- `analytics_article_details(begin_date, end_date)` — 按单个**发表日期**查询文章的累计表现和阅读质量。
+- `freepublish_batchget(offset, count, no_content?)`、`freepublish_getarticle(article_id)` — 已发表文章列表与正文。
+
+日期统一 `YYYY-MM-DD`，最早 `2025-11-01`，最晚北京时间昨日；单日接口起止相同。统计要求企业主体已认证账号，读取列表成功不能证明有统计权限。保留 `is_delay` 与原始微信错误；详情中的累计记录不可相加。
 
 ### 草稿（MCP `draft_*`）
 - `draft_add(articles=[Article, ...])` → `{media_id}`
@@ -200,6 +212,7 @@ WeChat 把业务错误放在**响应 body**，HTTP 状态仍是 200。判定失�
 | 40164 | IP 不在白名单 | 到公众号后台加服务器出口 IP 到"IP 白名单" |
 | 40007 | media_id 无效 | 临时素材过期（3 天）或打错；重新上传。或者 draft 被改过 media_id 变了 |
 | 45009 | API quota 用完 | 先和用户确认，再 `POST /wechat/clear-quota` |
+| 48001 | 账号没有该接口权限 | 核对账号主体、认证与接口权限；不能解释为零运营数据 |
 | 53503 | 文章含敏感内容被拦 | 让用户修改后重试 |
 
 返回的 `errmsg` 要原样给用户看，不要翻译 — 排查时原文更容易搜到文档。
@@ -213,7 +226,7 @@ WeChat 把业务错误放在**响应 body**，HTTP 状态仍是 200。判定失�
 - ❌ 不要对大 content（>25K）用 MCP 的 `draft_add` / `draft_update` — 可能被 JSON 工具调用截断。改 HTTP `curl --data @file.json` 更稳。
 - ❌ 不要自己缓存 `access_token` — 服务端有磁盘缓存 + asyncio 锁。
 - ❌ 不要绕过服务直接打 `api.weixin.qq.com` — 跳过 token 缓存和并发保护。
-- ❌ 不要对**发布 / 群发 / 订阅消息**找 MCP 工具 — 这套 skill 只做草稿，让用户到 公众号后台 手动发。
+- ❌ 不要对**正式发布 / 删除已发表文章 / 群发 / 订阅消息**找 MCP 工具 — 用户到公众号后台手动发布；运营工具只查询。
 
 ## 为什么上传走脚本而不是 MCP
 
@@ -225,7 +238,7 @@ Claude Code 的 MCP 客户端把工具调用参数当 JSON 序列化，**file �
 - 脚本把 errcode≠0 转成非零 exit，shell 错误传播干净
 - 业务错误（40013 AppID、40164 IP 白名单、40001 token 等）命中时打印 hint
 
-**JSON 操作**（`draft_*`, `material` 查询/删除, `healthz`）优先走可用 MCP；工具不可见或 content 过大时，使用同一服务的认证 HTTP 接口。
+**JSON 操作**（草稿、素材查询／删除、已发表文章查询、运营统计、健康检查）优先走可用 MCP；工具不可见或 content 过大时，使用同一服务的认证 HTTP 接口。
 
 ## 调试
 
