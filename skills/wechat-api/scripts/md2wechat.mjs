@@ -21,7 +21,7 @@
 //
 // Usage:
 //   node md2wechat.mjs <article.md> [--title "…"] [--no-cite] [--no-wrap-tables]
-//                                   [--out FILE] [--preview]
+//                                   [--out FILE] [--preview] [--theme FILE]
 //   cat article.md | node md2wechat.mjs --stdin
 //
 // Dependencies live in scripts/package.json. Run `npm install` once in scripts/.
@@ -36,6 +36,7 @@ import { markedHighlight } from 'marked-highlight';
 import { gfmHeadingId } from 'marked-gfm-heading-id';
 import hljs from 'highlight.js';
 import juice from 'juice';
+import { formatArticleEndmatter } from './article-endmatter.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const THEME_CSS_PATH = path.join(__dirname, '..', 'assets', 'theme.css');
@@ -43,13 +44,14 @@ const IMG_PLACEHOLDER_PREFIX = 'WECHATIMG_';
 
 // --------- CLI ---------
 function parseArgs(argv) {
-  const opts = { file: null, stdin: false, title: null, cite: true, out: null, preview: false, wrapTables: true };
+  const opts = { file: null, stdin: false, title: null, cite: true, out: null, preview: false, wrapTables: true, theme: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--title' && argv[i + 1]) opts.title = argv[++i];
     else if (a === '--no-cite') opts.cite = false;
     else if (a === '--no-wrap-tables') opts.wrapTables = false;
     else if (a === '--out' && argv[i + 1]) opts.out = argv[++i];
+    else if (a === '--theme' && argv[i + 1]) opts.theme = argv[++i];
     else if (a === '--preview') opts.preview = true;
     else if (a === '--stdin') opts.stdin = true;
     else if (a === '--help' || a === '-h') { printHelp(); process.exit(0); }
@@ -73,6 +75,7 @@ Options:
   --no-wrap-tables    Skip the <section style="overflow:auto"> table wrapper
                       (default: wrap — so tables scroll horizontally on mobile)
   --out FILE          Also write the fragment to FILE (default: /tmp/md2wechat-<ts>.html)
+  --theme FILE        Use a bundled/custom stylesheet instead of the grace theme
   --preview           Also write <out>.preview.html with <html><body> chrome and
                       placeholders resolved to file:// paths, for browser sanity-check
   --stdin             Read markdown from stdin (image paths relative to cwd)
@@ -229,7 +232,9 @@ async function main() {
   const mdCited = opts.cite ? convertLinksToFootnotes(mdPH) : mdPH;
 
   // 3. H1 dedup (skip first H1 that matches title — WeChat shows title in its own UI block)
-  const mdNoDupH1 = mdCited.replace(/^#\s+(.+)\n/, (first, firstTitle) =>
+  // NOTE: tolerate leading blank lines — after frontmatter is stripped the body
+  // usually starts with "\n", which made the old /^#/ anchor miss every time.
+  const mdNoDupH1 = mdCited.replace(/^\s*#\s+(.+)\n/, (first, firstTitle) =>
     firstTitle.trim() === title ? '' : first);
 
   // 4. marked → HTML
@@ -240,7 +245,7 @@ async function main() {
 
   // 6. structural wrapper + juice inline
   const wrapped = wrapBody(wrappedTables);
-  const css = fs.readFileSync(THEME_CSS_PATH, 'utf-8');
+  const css = fs.readFileSync(opts.theme || THEME_CSS_PATH, 'utf-8');
   const htmlWithStyle = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body>${wrapped}</body></html>`;
   const inlined = juice(htmlWithStyle, {
     removeStyleTags: true,
@@ -251,7 +256,7 @@ async function main() {
   });
 
   const bodyMatch = inlined.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-  const fragment = (bodyMatch ? bodyMatch[1] : inlined).trim();
+  const fragment = formatArticleEndmatter((bodyMatch ? bodyMatch[1] : inlined).trim());
 
   // 7. write
   const outPath = opts.out || path.join(os.tmpdir(), `md2wechat-${Date.now()}.html`);

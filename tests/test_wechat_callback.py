@@ -119,7 +119,7 @@ def test_url_verification_rejects_bad_signature(client):
 
 def test_subscribe_event_marks_follower(client, fresh_directory):
     with respx.mock(base_url=API) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
         )
         mock.get("/cgi-bin/user/info").mock(
@@ -137,7 +137,7 @@ def test_subscribe_event_marks_follower(client, fresh_directory):
 def test_unsubscribe_event_drops_follower(client, fresh_directory):
     fresh_directory._unionids = {"u_gone"}
     with respx.mock(base_url=API) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
         )
         mock.get("/cgi-bin/user/info").mock(
@@ -202,7 +202,7 @@ async def db_directory():
 async def test_subscribe_then_unsubscribe_flips_gate_via_db(client, db_directory):
     """完整走一遍：关注 → 门禁放行；取关 → 门禁拦下。全部以库为准."""
     with respx.mock(base_url=API) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
         )
         user_info = mock.get("/cgi-bin/user/info").mock(
@@ -223,7 +223,7 @@ async def test_subscribe_then_unsubscribe_flips_gate_via_db(client, db_directory
 
 async def test_resubscribe_restores_access(client, db_directory):
     with respx.mock(base_url=API) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
         )
         mock.get("/cgi-bin/user/info").mock(

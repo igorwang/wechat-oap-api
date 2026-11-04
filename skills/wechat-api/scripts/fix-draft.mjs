@@ -19,13 +19,13 @@
 //
 // Env:
 //   WECHAT_API_BASE_URL   default https://wxapi.techower.com
-//   WECHAT_API_KEY        required
+//   WECHAT_API_KEY        required; legacy WECHAT_OAP_API_KEY is a fallback
 //
 // Dry-run prints the diff of before/after counts without pushing. Normal run prints
 // the update errcode/errmsg and a summary.
 
 const BASE = (process.env.WECHAT_API_BASE_URL || 'https://wxapi.techower.com').replace(/\/$/, '');
-const KEY = process.env.WECHAT_API_KEY || '';
+const KEY = process.env.WECHAT_API_KEY || process.env.WECHAT_OAP_API_KEY || '';
 
 function parseArgs(argv) {
   const o = { mediaId: null, wrapTables: true, dryRun: false };

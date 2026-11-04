@@ -394,7 +394,7 @@ def followers(monkeypatch):
 
 
 def _mock_oa(mock, *, follower_unionids):
-    mock.get(f"{OA}/cgi-bin/token").mock(
+    mock.post(f"{OA}/cgi-bin/stable_token").mock(
         return_value=httpx.Response(200, json={"access_token": "OATOK", "expires_in": 7200})
     )
     openids = [f"o{i}" for i in range(len(follower_unionids))]

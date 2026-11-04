@@ -16,7 +16,7 @@ def client():
 
 
 def _token_mock(mock):
-    mock.get("/cgi-bin/token").mock(
+    mock.post("/cgi-bin/stable_token").mock(
         return_value=httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
     )
 

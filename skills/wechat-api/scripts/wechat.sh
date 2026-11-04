@@ -6,6 +6,7 @@
 # Env:
 #   WECHAT_API_BASE_URL  default https://wxapi.techower.com
 #   WECHAT_API_KEY       required for anything except `health`
+#   WECHAT_OAP_API_KEY   legacy fallback; WECHAT_API_KEY takes precedence
 #
 # Subcommands:
 #   health
@@ -27,7 +28,7 @@ set -euo pipefail
 
 BASE="${WECHAT_API_BASE_URL:-https://wxapi.techower.com}"
 BASE="${BASE%/}"
-KEY="${WECHAT_API_KEY:-}"
+KEY="${WECHAT_API_KEY:-${WECHAT_OAP_API_KEY:-}}"
 
 die()   { printf 'error: %s\n' "$*" >&2; exit 1; }
 need()  { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
@@ -52,7 +53,8 @@ _post_multipart() {
   local url="$BASE$path"
   local tmp_body http_status
   tmp_body="$(mktemp)"
-  trap 'rm -f "$tmp_body"' RETURN
+  # Capture the path now: RETURN also fires after the outer function's scope ends.
+  trap "rm -f '$tmp_body'" RETURN
 
   local curl_args=(-sS -o "$tmp_body" -w '%{http_code}' -X POST "$url")
   if [ -n "$KEY" ]; then curl_args+=(-H "X-API-Key: $KEY"); fi
@@ -79,7 +81,7 @@ _post_multipart() {
     case "$errcode" in
       40001|42001) printf 'hint: access_token invalid — service will retry once; if still failing, check WECHAT_APPSECRET in .env\n' >&2 ;;
       40013)       printf 'hint: AppID mismatch — WECHAT_APPID in .env does not match the account\n' >&2 ;;
-      40164)       printf 'hint: server egress IP not in 公众号后台 → 基本配置 → IP 白名单\n' >&2 ;;
+      40164)       printf 'hint: server egress IP not in 微信开发者平台 → 基础信息 → 开发密钥 → API IP 白名单\n' >&2 ;;
       40007)       printf 'hint: media_id invalid — temporary material expired (3-day TTL) or typo\n' >&2 ;;
       45009)       printf 'hint: API quota exhausted — confirm with user before POST /wechat/clear-quota\n' >&2 ;;
       53503)       printf 'hint: article content flagged as sensitive by WeChat\n' >&2 ;;

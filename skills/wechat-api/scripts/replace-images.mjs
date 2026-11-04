@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// replace-images — substitute WECHATIMG_N placeholders in a md2wechat-generated HTML
-// fragment with the real CDN URLs returned by upload-inline (or upload-cover).
+// replace-images — substitute converter placeholders or editorial-renderer local
+// image paths with the real CDN URLs returned by upload-inline.
 //
 // Two input forms for the mapping:
 //   (a) mapping.json        → { "WECHATIMG_1": "https://mmbiz.qpic.cn/…", ... }
@@ -66,13 +66,18 @@ function main() {
   const used = new Set();
   const report = { replaced: [], unmatched: [] };
 
-  // Replace src="WECHATIMG_N" occurrences
-  let out = html.replace(/src=(["'])(WECHATIMG_\d+)\1/g, (full, quote, key) => {
+  // Both converters expose the exact src key in their images[] manifest.
+  let out = html.replace(/\bsrc=(["'])([^"']+)\1/g, (full, quote, key) => {
     const url = mapping[key];
-    if (!url) { report.unmatched.push(key); return full; }
+    if (!url) {
+      if (!/^(?:https?:|data:|\/\/)/i.test(key)) report.unmatched.push(key);
+      return full;
+    }
+    if (!/^https?:\/\//i.test(url)) throw new Error('Uploaded image URL must use HTTP(S)');
     used.add(key);
     report.replaced.push({ key, url });
-    return `src=${quote}${url}${quote}`;
+    const escaped = url.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+    return `src=${quote}${escaped}${quote}`;
   });
 
   // Catch any bare text occurrences (shouldn't happen if only <img src="…"> placeholders

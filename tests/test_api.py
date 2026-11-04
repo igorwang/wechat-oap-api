@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 import respx
@@ -46,9 +48,36 @@ def test_stable_token_route(client):
         assert r.json()["access_token"] == "STAB"
 
 
+def test_manual_stable_refresh_updates_the_business_cache(client):
+    active = ["OLD"]
+    modes = []
+
+    def stable(request):
+        forced = json.loads(request.content)["force_refresh"]
+        modes.append(forced)
+        if forced:
+            active[0] = "NEW"
+        return httpx.Response(200, json={"access_token": active[0], "expires_in": 7200})
+
+    def callback(request):
+        if request.url.params["access_token"] != active[0]:
+            return httpx.Response(200, json={"errcode": 40001, "errmsg": "old token"})
+        return httpx.Response(200, json={"ip_list": ["1.2.3.4"]})
+
+    with respx.mock(base_url=BASE) as mock:
+        mock.post("/cgi-bin/stable_token").mock(side_effect=stable)
+        requests = mock.get("/cgi-bin/getcallbackip").mock(side_effect=callback)
+        assert client.get("/wechat/callback-ip").json() == {"ip_list": ["1.2.3.4"]}
+        assert client.get("/wechat/stable-token?force_refresh=true").json()["access_token"] == "NEW"
+        assert client.get("/wechat/callback-ip").json() == {"ip_list": ["1.2.3.4"]}
+    assert modes == [False, True]
+    assert requests.call_count == 2
+    assert requests.calls.last.request.url.params["access_token"] == "NEW"
+
+
 def test_callback_check_route(client):
     with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "T", "expires_in": 7200}
             )
@@ -66,7 +95,7 @@ def test_callback_check_route(client):
 
 def test_api_domain_ip_route(client):
     with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "T", "expires_in": 7200}
             )
@@ -81,7 +110,7 @@ def test_api_domain_ip_route(client):
 
 def test_callback_ip_route(client):
     with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "T", "expires_in": 7200}
             )
@@ -96,7 +125,7 @@ def test_callback_ip_route(client):
 
 def test_clear_quota_route(client):
     with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "T", "expires_in": 7200}
             )

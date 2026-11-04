@@ -50,7 +50,7 @@ async def test_fetch_stable_token_posts_json(fresh_client):
 
 async def test_cached_token_reuses(fresh_client):
     async with respx.mock(base_url=BASE) as mock:
-        token_route = mock.get("/cgi-bin/token").mock(
+        token_route = mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "CACHED", "expires_in": 7200}
             )
@@ -63,7 +63,7 @@ async def test_cached_token_reuses(fresh_client):
 
 async def test_cached_token_refreshes_on_40001(fresh_client):
     async with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             side_effect=[
                 httpx.Response(200, json={"access_token": "OLD", "expires_in": 7200}),
                 httpx.Response(200, json={"access_token": "NEW", "expires_in": 7200}),
@@ -84,7 +84,7 @@ async def test_cached_token_refreshes_on_40001(fresh_client):
 
 async def test_callback_check_post_body(fresh_client):
     async with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "T", "expires_in": 7200}
             )
@@ -102,7 +102,7 @@ async def test_callback_check_post_body(fresh_client):
 
 async def test_get_api_domain_ip(fresh_client):
     async with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "T", "expires_in": 7200}
             )
@@ -116,7 +116,7 @@ async def test_get_api_domain_ip(fresh_client):
 
 async def test_clear_quota_defaults_to_env_appid(fresh_client):
     async with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "T", "expires_in": 7200}
             )

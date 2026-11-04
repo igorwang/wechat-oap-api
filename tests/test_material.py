@@ -16,7 +16,7 @@ def client():
 
 
 def _token_mock(mock):
-    mock.get("/cgi-bin/token").mock(
+    mock.post("/cgi-bin/stable_token").mock(
         return_value=httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
     )
 
@@ -60,6 +60,35 @@ def test_batchget_permanent(client):
         )
         assert r.status_code == 200
         assert b'"type":"image"' in route.calls.last.request.content
+
+
+def test_batchget_permanent_news(client):
+    with respx.mock(base_url=BASE) as mock:
+        _token_mock(mock)
+        route = mock.post("/cgi-bin/material/batchget_material").mock(
+            return_value=httpx.Response(200, json={"total_count": 1, "item": []})
+        )
+        response = client.post("/wechat/material/permanent/batchget", json={"type": "news"})
+        assert response.status_code == 200
+        assert b'"type":"news"' in route.calls.last.request.content
+
+
+def test_batchget_permanent_rejects_upload_only_thumb(client):
+    with respx.mock:
+        response = client.post("/wechat/material/permanent/batchget", json={"type": "thumb"})
+    assert response.status_code == 422
+
+
+def test_thumbnail_upload_remains_supported(client):
+    with respx.mock(base_url=BASE) as mock:
+        _token_mock(mock)
+        route = mock.post("/cgi-bin/material/add_material").mock(
+            return_value=httpx.Response(200, json={"media_id": "THUMB"})
+        )
+        response = client.post("/wechat/material/permanent/add?type=thumb",
+            files={"media": ("thumb.jpg", b"image", "image/jpeg")})
+        assert response.status_code == 200
+        assert route.calls.last.request.url.params["type"] == "thumb"
 
 
 def test_delete_permanent(client):

@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 import respx
@@ -16,7 +18,7 @@ def client():
 
 
 def _token_mock(mock):
-    mock.get("/cgi-bin/token").mock(
+    mock.post("/cgi-bin/stable_token").mock(
         return_value=httpx.Response(200, json={"access_token": "T", "expires_in": 7200})
     )
 
@@ -55,6 +57,48 @@ def test_update(client):
         assert r.status_code == 200
         body = route.calls.last.request.content
         assert b'"index":0' in body
+
+
+@pytest.mark.parametrize("operation", ["add", "update"])
+def test_picture_draft_without_legacy_thumbnail(client, operation):
+    article = {
+        "article_type": "newspic",
+        "title": "Pictures",
+        "content": "Picture caption",
+        "image_info": {"image_list": [{"image_media_id": "IMG1"}]},
+        "cover_info": {"crop_percent_list": [{"ratio": "1_1", "x1": 0, "y1": 0, "x2": 1, "y2": 1}]},
+        "product_info": {"footer_product": {"product_key": "example"}},
+    }
+    payload = {"articles": [article]} if operation == "add" else {
+        "media_id": "M", "index": 0, "articles": article,
+    }
+    with respx.mock(base_url=BASE) as mock:
+        _token_mock(mock)
+        route = mock.post(f"/cgi-bin/draft/{operation}").mock(
+            return_value=httpx.Response(200, json={"media_id": "M", "errcode": 0})
+        )
+        response = client.post(f"/wechat/draft/{operation}", json=payload)
+        assert response.status_code == 200
+        sent = json.loads(route.calls.last.request.content)["articles"]
+        if operation == "add":
+            sent = sent[0]
+        assert "thumb_media_id" not in sent
+        for field, value in article.items():
+            assert sent[field] == value
+
+
+@pytest.mark.parametrize("article", [
+    {"title": "News", "content": "body"},
+    {"article_type": "newspic", "title": "Pictures", "content": "caption"},
+    {"article_type": "newspic", "title": "Pictures", "content": "caption", "image_info": {"image_list": []}},
+    {"article_type": "newspic", "title": "Pictures", "content": "caption", "image_info": {
+        "image_list": [{"image_media_id": "IMG"}] * 21,
+    }},
+])
+def test_draft_requires_type_specific_media(client, article):
+    with respx.mock:
+        response = client.post("/wechat/draft/add", json={"articles": [article]})
+    assert response.status_code == 422
 
 
 def test_get(client):

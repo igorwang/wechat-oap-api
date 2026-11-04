@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 import httpx
 import respx
@@ -12,10 +13,10 @@ BASE = settings.wechat_api_base
 
 
 async def test_concurrent_fetch_deduplicates():
-    """Many parallel callers on a cold cache should trigger exactly one /cgi-bin/token."""
+    """Many parallel callers on a cold cache should trigger exactly one /cgi-bin/stable_token."""
     client = WeChatClient(cache_path="")
     async with respx.mock(base_url=BASE) as mock:
-        route = mock.get("/cgi-bin/token").mock(
+        route = mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "ONCE", "expires_in": 7200}
             )
@@ -32,7 +33,7 @@ async def test_file_persistence_survives_new_instance(tmp_path):
     cache_file = tmp_path / "token.json"
     client_a = WeChatClient(cache_path=str(cache_file))
     async with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "PERSISTED", "expires_in": 7200}
             )
@@ -47,7 +48,7 @@ async def test_file_persistence_survives_new_instance(tmp_path):
     # New instance, same file: should load from disk without hitting WeChat.
     client_b = WeChatClient(cache_path=str(cache_file))
     async with respx.mock(base_url=BASE, assert_all_called=False) as mock:
-        token_route = mock.get("/cgi-bin/token")
+        token_route = mock.post("/cgi-bin/stable_token")
         assert await client_b.get_cached_access_token() == "PERSISTED"
         assert token_route.call_count == 0
 
@@ -57,7 +58,7 @@ async def test_40001_clears_persisted_cache(tmp_path):
     cache_file = tmp_path / "token.json"
     client = WeChatClient(cache_path=str(cache_file))
     async with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             side_effect=[
                 httpx.Response(
                     200, json={"access_token": "OLD", "expires_in": 7200}
@@ -86,6 +87,7 @@ async def test_cache_file_ignored_when_appid_mismatches(tmp_path):
         json.dumps(
             {
                 "appid": "someone_elses_appid",
+                "token_source": "stable_token",
                 "access_token": "STALE",
                 "expiry": 9999999999.0,
             }
@@ -93,9 +95,102 @@ async def test_cache_file_ignored_when_appid_mismatches(tmp_path):
     )
     client = WeChatClient(cache_path=str(cache_file))
     async with respx.mock(base_url=BASE) as mock:
-        mock.get("/cgi-bin/token").mock(
+        mock.post("/cgi-bin/stable_token").mock(
             return_value=httpx.Response(
                 200, json={"access_token": "FRESH", "expires_in": 7200}
             )
         )
         assert await client.get_cached_access_token() == "FRESH"
+
+
+async def test_cold_cache_uses_stable_token_without_forcing(fresh_client):
+    async with respx.mock(base_url=BASE) as mock:
+        route = mock.post("/cgi-bin/stable_token").mock(
+            return_value=httpx.Response(200, json={"access_token": "STABLE", "expires_in": 7200})
+        )
+        assert await fresh_client.get_cached_access_token() == "STABLE"
+        assert json.loads(route.calls.last.request.content) == {
+            "grant_type": "client_credential",
+            "appid": "test_appid",
+            "secret": "test_secret",
+            "force_refresh": False,
+        }
+
+
+async def test_unmarked_legacy_cache_is_not_reused(tmp_path):
+    cache_file = tmp_path / "token.json"
+    cache_file.write_text(json.dumps({
+        "appid": settings.wechat_appid,
+        "access_token": "LEGACY",
+        "expiry": 9999999999.0,
+    }))
+    client = WeChatClient(cache_path=str(cache_file))
+    async with respx.mock(base_url=BASE) as mock:
+        mock.post("/cgi-bin/stable_token").mock(
+            return_value=httpx.Response(200, json={"access_token": "STABLE", "expires_in": 7200})
+        )
+        assert await client.get_cached_access_token() == "STABLE"
+    saved = json.loads(cache_file.read_text())
+    assert saved["token_source"] == "stable_token"
+    restored = WeChatClient(cache_path=str(cache_file))
+    async with respx.mock:
+        assert await restored.get_cached_access_token() == "STABLE"
+    await client.close()
+    await restored.close()
+
+
+async def test_stable_cache_uses_remaining_expiry(monkeypatch, fresh_client):
+    import app.wechat as module
+
+    now = [1000.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(time=lambda: now[0]))
+    async with respx.mock(base_url=BASE) as mock:
+        route = mock.post("/cgi-bin/stable_token").mock(side_effect=[
+            httpx.Response(200, json={"access_token": "SHORT", "expires_in": 120}),
+            httpx.Response(200, json={"access_token": "NEXT", "expires_in": 7200}),
+        ])
+        assert await fresh_client.get_cached_access_token() == "SHORT"
+        now[0] = 1059
+        assert await fresh_client.get_cached_access_token() == "SHORT"
+        assert route.call_count == 1
+        now[0] = 1061
+        assert await fresh_client.get_cached_access_token() == "NEXT"
+        assert json.loads(route.calls.last.request.content)["force_refresh"] is False
+
+
+async def test_concurrent_rejections_force_refresh_once_and_preserve_new_cache(tmp_path):
+    cache_file = tmp_path / "token.json"
+    client = WeChatClient(cache_path=str(cache_file))
+    arrived = 0
+    all_arrived = asyncio.Event()
+    modes = []
+
+    def stable(request):
+        forced = json.loads(request.content)["force_refresh"]
+        modes.append(forced)
+        return httpx.Response(200, json={"access_token": "NEW" if forced else "OLD", "expires_in": 7200})
+
+    async def callback(request):
+        nonlocal arrived
+        if request.url.params["access_token"] == "OLD":
+            arrived += 1
+            if arrived == 20:
+                all_arrived.set()
+            await all_arrived.wait()
+            return httpx.Response(200, json={"errcode": 40001, "errmsg": "invalid token"})
+        return httpx.Response(200, json={"ip_list": ["1.2.3.4"]})
+
+    async with respx.mock(base_url=BASE) as mock:
+        mock.post("/cgi-bin/stable_token").mock(side_effect=stable)
+        mock.get("/cgi-bin/getcallbackip").mock(side_effect=callback)
+        results = await asyncio.wait_for(asyncio.gather(*[
+            client.get_callback_ip() for _ in range(20)
+        ]), timeout=3)
+    assert results == [{"ip_list": ["1.2.3.4"]}] * 20
+    assert modes == [False, True]
+    assert json.loads(cache_file.read_text())["access_token"] == "NEW"
+    restored = WeChatClient(cache_path=str(cache_file))
+    async with respx.mock:
+        assert await restored.get_cached_access_token() == "NEW"
+    await client.close()
+    await restored.close()

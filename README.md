@@ -3,11 +3,11 @@
 微信公众号（订阅号 / 服务号）服务端 API 的 FastAPI 封装，同时通过 MCP 对 AI Agent 暴露。
 Token 自动缓存、鉴权内置、一条 `docker compose up` 即可部署。
 
-- **37 个 HTTP 接口**，覆盖发布端到端：基础接口 6 + 发布能力 5 + 草稿管理 8 + 素材管理 9 + 基础消息 10
-- **Access Token 自动管理**：asyncio 锁去重 + 文件持久化 + 40001/42001 自动刷新
+- **HTTP 接口**覆盖基础能力、发布、草稿、素材、消息，以及微信客服与回调
+- **Access Token 自动管理**：内部使用稳定版 Token，asyncio 锁去重 + 文件持久化 + 40001/42001 一次恢复重试
 - **MCP 暴露（故意收窄）**：只有 **草稿 + 素材 + healthz 共 18 个** tool 走 MCP；发布、群发、订阅消息等保留为 HTTP-only，避免 Agent 误触发。见 `main.py` 里的 `MCP_TOOLS` 白名单
 - **API Key 鉴权**：保护 `/wechat/*` 与 `/mcp`，可关
-- **63 个测试** 全绿（httpx + respx + pytest-asyncio）
+- **离线测试**：httpx + respx + pytest-asyncio；运行结果以本次检查为准
 
 ---
 
@@ -63,6 +63,24 @@ scripts/docker-push.sh v0.2.0   # 或手动指定 tag
 | `API_KEY_HEADER` |  | `X-API-Key` | 鉴权 header 名 |
 | `PORT` |  | `8000` | compose 对外映射端口 |
 
+AppID、AppSecret、IP 白名单和接口权限在[微信开发者平台](https://developers.weixin.qq.com/platform/)管理，入口以[官方迁移说明](https://developers.weixin.qq.com/doc/subscription/guide/dev/migration.html)为准。
+
+### 稳定凭据与永久素材下载
+
+内部缓存默认调用 `POST /cgi-bin/stable_token`，普通获取使用 `force_refresh=false`，过期时间使用响应的 `expires_in`。收到 40001／42001 时，仅在被拒绝的 Token 仍为当前缓存时强制刷新，并重试原请求一次；并发的旧请求复用已刷新的 Token。手动调用 `/wechat/stable-token` 也会同步业务缓存。
+
+持久化缓存带 `token_source: stable_token`；升级后忽略无此标记的旧缓存，首次业务请求重新获取稳定凭据。继续使用已有 AppID、AppSecret 和缓存路径。
+
+`POST /wechat/material/permanent/get` 返回图文、视频及微信错误时仍为 JSON。图片、语音等二进制素材默认返回 MCP 可读取的对象：
+
+```json
+{"encoding": "base64", "content_type": "image/png", "data": "<Base64 文件内容>"}
+```
+
+HTTP 下载原始文件时，在同一接口添加查询参数 `?response_format=raw`，请求体仍为 `{"media_id": "永久素材ID"}`；响应保留原始字节、Content-Type 和上游 HTTP 状态。MCP 调用使用默认值或显式 `response_format=base64`，将 `data` 做 Base64 解码即可还原文件。
+
+实现与本轮验证见[稳定 Token 与素材下载维护记录](docs/stable-token-material-20261104.md)。
+
 ---
 
 ## 鉴权
@@ -74,6 +92,8 @@ X-API-Key: some-long-random-string
 ```
 
 放行路径（不需要 key）：`/healthz`, `/docs`, `/redoc`, `/openapi.json`。
+
+服务端 `API_KEY` 与客户端 `WECHAT_API_KEY` 使用同一个值：服务端负责校验，客户端脚本和 MCP 负责发送。`WECHAT_OAP_API_KEY` 是旧客户端变量名；新配置统一使用 `WECHAT_API_KEY`。HTTP 脚本仍支持旧名回退，两者同时设置时以新名为准。原先仅导出旧变量的 MCP 客户端，请将相同值迁到 `WECHAT_API_KEY`，再重载配置。
 
 ---
 
@@ -96,7 +116,7 @@ X-API-Key: some-long-random-string
       "type": "http",
       "url": "http://localhost:8000/mcp",
       "headers": {
-        "X-API-Key": "${WECHAT_OAP_API_KEY}"
+        "X-API-Key": "${WECHAT_API_KEY}"
       }
     }
   }
@@ -106,7 +126,7 @@ X-API-Key: some-long-random-string
 使用步骤：
 
 1. 本地/服务器上把服务跑起来（`docker compose up -d`）
-2. 在 shell 里 export key：`export WECHAT_OAP_API_KEY=...`（建议写进 `~/.zshrc` 或 direnv）
+2. 在 shell 里 export key：`export WECHAT_API_KEY=...`（建议写进 `~/.zshrc` 或 direnv）
 3. `cd` 进本仓库，Claude Code 首次会提示"approve project MCP"，同意即可
 4. `claude mcp list` 能看到 `wechat-oap`
 
@@ -146,13 +166,13 @@ claude mcp add \
 
 进入 Claude Code 后问一句：
 
-> 用 wechat-oap 查一下当前 access_token
+> 用 wechat-oap 检查服务健康状态
 
-Claude 会调用 MCP 工具 `get_access_token`。如果你配了 key，请求会自动带 `X-API-Key` 头；没配 key 或配错 → 401。
+Claude 会调用 MCP 工具 `healthz`。需要验证鉴权时再调用 `draft_count`；`healthz` 是公开健康检查，不验证 API Key。Token 查询只通过 HTTP 提供，不在 MCP 白名单内。
 
 ### 安装 wechat-api Skill
 
-本仓库在 `skills/wechat-api/` 下内置了一个 Skill,指导 Claude 通过 `wechat-oap` MCP 起草公众号图文、管理素材(scope 仅限草稿,不含发布/群发)。
+本仓库在 [`skills/wechat-api/`](skills/wechat-api/SKILL.md) 内置公众号写作、排版与草稿技能。2026-11-04 同步了 SurviAGI 于 2026-11-03 确认的长文语言模板和 v7 视觉标准，配套资源全部位于技能内，可单独安装。
 
 **项目级安装**(只在当前项目生效):
 
@@ -169,24 +189,33 @@ npx -y degit igorwang/wechat-oap-api/skills/wechat-api ~/.claude/skills/wechat-a
 
 安装完成后,在 Claude Code 里输入类似 "帮我起草一篇公众号图文" / "上传一张封面图" 就会自动触发;也可以 `/wechat-api` 显式调用。
 
-> 前置:先完成上一节的 MCP 接入(方式 A/B/C 任一),否则 Skill 找不到 `draft_add`、`material_add` 等工具。
+> 本地写作与排版不需要 MCP 或 API Key。创建/更新远端草稿才需接入自己的服务；图片上传使用技能内 HTTP 脚本。
 
 ### Skill 怎么用
 
-Skill 里**不用**写 key。直接调 MCP 工具名即可:
+在技能目录安装依赖，再生成仓库内的演示稿：
 
-```markdown
----
-name: 微信发布
-description: 从草稿 media_id 发布图文到公众号
----
-
-1. 调 `freepublish_submit`，传入用户给的 `media_id`
-2. 轮询 `freepublish_get` 直到 `publish_status` 终态
-3. 把结果返回给用户
+```bash
+cd skills/wechat-api
+npm --prefix scripts ci --ignore-scripts
+node scripts/render.mjs examples/editorial-article.md --out-dir /tmp/wechat-editorial-preview --date 2026-11-04
 ```
 
-MCP 客户端在调用 `freepublish_submit` 时会自动带上 `X-API-Key`，skill 本体见不到也不需要传递。
+需要 Node.js 20+；本地结构检查另需 Python 3。输出 `article.wechat.html`、`article-preview.html`，以及 `research/article-conversion.json`、`research/article-layout-check.json`。预览仅在本地，命令不会上传或写入草稿。
+
+- [写作模板](skills/wechat-api/references/writing-guide.md)：四段已认可样例及适用条件，覆盖事件、解释、轻吐槽和故事包袱。
+- [视觉模板](skills/wechat-api/references/editorial-design.md)：固定 C 版 Logo、近黑/绿色层级、透明正文、动态目录、章标和统一署名。仅为其他账号排版时保留其品牌和原文，使用原 `md2wechat.mjs` 通用入口。
+- [草稿回读](skills/wechat-api/references/render-and-readback.md)：上传使用本次清单里的全部图片，含品牌图；图片替换后再写入草稿，完成后重新读取核验。
+
+维护时验证：
+
+```bash
+npm --prefix skills/wechat-api/scripts test
+python3 skills/wechat-api/scripts/check.py skills/wechat-api/examples/editorial-article.md
+bash skills/wechat-api/scripts/ai-voice-check.sh skills/wechat-api/examples/editorial-article.md
+```
+
+MCP 仍只暴露草稿、素材与健康检查。正式发布、群发和订阅消息保留 HTTP 接口，由使用者按自己的授权流程操作。
 
 ---
 
@@ -198,9 +227,15 @@ MCP 客户端在调用 `freepublish_submit` 时会自动带上 `X-API-Key`，ski
 | 发布能力 | `/wechat/freepublish/*` | `freepublish_*` | 5 |
 | 草稿管理 | `/wechat/draft/*` | `draft_*` | 8 |
 | 素材管理 | `/wechat/material/{permanent,temporary}/*` | `material_*` | 9 |
-| 基础消息 | `/wechat/message/{mass,subscribe,autoreply}/*` | `message_*` | 10 |
+| 基础消息 | `/wechat/message/{mass,subscribe,autoreply}/*` | `message_*` | 9 |
 
 完整 schema 见 http://localhost:8000/docs 。
+
+### 腾讯 API 核查与兼容
+
+2026-11-04 对照官方文档维护了两处兼容：草稿支持 `article_type: newspic`，无需传统封面 ID，改用最多 20 张永久图片素材；永久素材列表支持 `news` 类型。旧图文不填 `article_type` 时继续按 `news` 处理，裁切和商品扩展字段保留透传。
+
+官方来源、文档歧义、验证范围与待处理差异见 [本次维护记录](docs/maintenance-20261104.md)。这次核查不代表线上服务已升级。
 
 ---
 
@@ -208,7 +243,7 @@ MCP 客户端在调用 `freepublish_submit` 时会自动带上 `X-API-Key`，ski
 
 ```bash
 uv sync                       # 含 dev group
-uv run pytest                 # 63 tests
+uv run pytest                 # 离线服务端回归
 uv run pytest -v tests/test_auth.py   # 单文件
 ```
 

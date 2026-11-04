@@ -1,0 +1,9 @@
+{
+  "brand": "新人类 AI 生存指南（SurviAGI）",
+  "textTemplate": "本文由「{brand}」完成信息监测、分析、选题与写作。",
+  "legacyTexts": ["本文由「新人类AI实验室」写作 Harness 产出。", "本文由「新人类 AI 生存指南（SurviAGI）」写作 Harness 产出。"],
+  "containerStyle": "margin:32px 8px 24px;padding:16px 0 0;border-top:1px solid #D4D3CE;text-align:left;",
+  "textStyle": "margin:0;padding:0;font-family:'PingFang SC',sans-serif;font-size:12px;line-height:1.8;color:#6E6F69;font-style:normal;font-weight:400;letter-spacing:0;text-align:left;",
+  "brandStyle": "font-size:12px;font-weight:600;color:#6E6F69;font-style:normal;",
+  "englishStyle": "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#6E6F69;font-style:normal;"
+}

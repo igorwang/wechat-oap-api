@@ -11,9 +11,28 @@ wheels/
 
 # Environment
 .env
+.env.*
+!.env.example
+.env.bak
+.env.backup
+.env~
 .python-version
 .wechat_token.json
+.wechat_token.json.*
 .cs_cursor.json
+.cs_cursor.json.*
+.claude/settings.local.json
+
+# Local logs and database snapshots
+*.log
+*.log.*
+*.sqlite
+*.sqlite3
+*.db
+
+# Local packaging and service-validation outputs
+workbuddy-dist/
+workbuddy-validation/
 
 # Bind-mounted container data (PostgreSQL)
 data/

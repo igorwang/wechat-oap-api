@@ -25,7 +25,7 @@ def wechat(monkeypatch):
 
 
 def _mock_token(mock):
-    return mock.get("/cgi-bin/token").mock(
+    return mock.post("/cgi-bin/stable_token").mock(
         return_value=httpx.Response(200, json={"access_token": "OATOK", "expires_in": 7200})
     )
 

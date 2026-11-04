@@ -1,7 +1,11 @@
 import os
 
-os.environ.setdefault("WECHAT_APPID", "test_appid")
-os.environ.setdefault("WECHAT_APPSECRET", "test_secret")
+# Never use live credentials, a production database or startup follower sync in tests.
+os.environ["WECHAT_APPID"] = "test_appid"
+os.environ["WECHAT_APPSECRET"] = "test_secret"
+os.environ["API_KEY"] = ""
+os.environ["DATABASE_URL"] = ""
+os.environ["CS_REQUIRE_FOLLOW"] = "false"
 # Disable file token cache for tests by default; individual tests can override.
 os.environ["WECHAT_TOKEN_CACHE_PATH"] = ""
 

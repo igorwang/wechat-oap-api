@@ -81,7 +81,7 @@ async def get_stable_token(
     force_refresh: bool = Query(False, description="Force WeChat to issue a new token"),
 ) -> dict[str, Any]:
     """获取稳定版 Access Token (/cgi-bin/stable_token)."""
-    return await wechat_client.fetch_stable_token(force_refresh=force_refresh)
+    return await wechat_client.get_stable_token(force_refresh=force_refresh)
 
 
 @app.post("/wechat/callback/check", operation_id="callback_check", tags=["wechat"])

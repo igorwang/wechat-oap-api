@@ -1,8 +1,10 @@
 """素材管理 (material) — permanent + temporary, incl. multipart uploads."""
 
+import base64
 from typing import Any, Literal
 
 from fastapi import APIRouter, File, Form, Query, Response, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..wechat import wechat_client
@@ -11,6 +13,7 @@ router = APIRouter(prefix="/wechat/material", tags=["wechat"])
 
 
 MaterialType = Literal["image", "voice", "video", "thumb"]
+MaterialListType = Literal["image", "voice", "video", "news"]
 
 
 # -------- permanent material --------
@@ -21,18 +24,59 @@ class MediaIdBody(BaseModel):
 
 
 class BatchGetBody(BaseModel):
-    type: MaterialType
+    type: MaterialListType
     offset: int = Field(0, ge=0)
     count: int = Field(20, ge=1, le=20)
 
 
-@router.post("/permanent/get", operation_id="material_get")
-async def get_material(body: MediaIdBody) -> dict[str, Any]:
-    """获取永久素材 (/cgi-bin/material/get_material). 对图片/语音/缩略图 WeChat 直接返回
-    二进制，本接口仍按 JSON 转发；需要 raw bytes 时直接走微信。"""
-    return await wechat_client.call_json(
+@router.post(
+    "/permanent/get",
+    operation_id="material_get",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {
+                "application/json": {"schema": {"type": "object", "additionalProperties": True}},
+                "application/octet-stream": {"schema": {"type": "string", "format": "binary"}},
+            },
+        },
+    },
+)
+async def get_material(
+    body: MediaIdBody,
+    response_format: Literal["base64", "raw"] = Query(
+        "base64",
+        description=(
+            "Binary material: base64 is safe for MCP; raw downloads original bytes. "
+            "JSON materials and errors are unchanged."
+        ),
+    ),
+) -> Response:
+    """获取永久素材。图文、视频和微信错误返回 JSON；其他素材默认返回
+    {encoding, content_type, data} Base64 对象，response_format=raw 返回原始文件。
+    """
+    upstream = await wechat_client.call_response(
         "POST", "/cgi-bin/material/get_material", json=body.model_dump()
     )
+    try:
+        payload = upstream.json()
+    except ValueError:
+        content_type = upstream.headers.get("content-type") or "application/octet-stream"
+        if response_format == "raw":
+            return Response(
+                content=upstream.content,
+                status_code=upstream.status_code,
+                headers={"content-type": content_type},
+            )
+        return JSONResponse(
+            content={
+                "encoding": "base64",
+                "content_type": content_type,
+                "data": base64.b64encode(upstream.content).decode("ascii"),
+            },
+            status_code=upstream.status_code,
+        )
+    return JSONResponse(content=payload, status_code=upstream.status_code)
 
 
 @router.get("/permanent/count", operation_id="material_count")

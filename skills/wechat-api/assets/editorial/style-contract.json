@@ -1,0 +1,171 @@
+{
+  "version": 7,
+  "status": "approved-default",
+  "scope": "SurviAGI WeChat editorial visuals; category-specific override of general device/canvas/wordmark rules",
+  "reference": "User-provided WeChat screenshots (contents/lead, PART heading, principle card) received 2026-11-02 + Feyn-SurviAGI-C-brand-kit-20261030.zip for actual identity and green; not a claim of full reference-page reading",
+  "identity": {
+    "brand": "SurviAGI",
+    "chinese": "新人类 AI 生存指南",
+    "wordmark": "surviagi-horizontal-en-light.png",
+    "mainLatinTypeface": "Arial Rounded MT Bold (outlined asset)",
+    "symbol": "original f. with green accent dot",
+    "noProductIdentitySubstitution": true,
+    "placement": "Original transparent PNG near the end, immediately before the writing signature; no article masthead",
+    "vectorWordmark": "surviagi-horizontal-en-light.svg",
+    "sha256": "5ced5ac36225cdc4d3de2edbb94ecbcd767010a64ea2e811df1151d3e45dc513",
+    "manifest": "asset-manifest.json",
+    "displayWidth": 300,
+    "scopeNote": "Use this exact C-kit wordmark for WeChat articles; product Feyn OS is not the mother-brand signature."
+  },
+  "colors": {
+    "page": "#FFFFFF",
+    "dark": "#141413",
+    "reverseBrand": "#E9E8EA",
+    "lightDot": "#347B40",
+    "darkDot": "#82C38C",
+    "card": "#FFFFFF",
+    "line": "#141413",
+    "text": "#333333",
+    "text2": "#2F2F2C",
+    "muted": "#777777",
+    "brandLightCanvas": "#F3F2EE",
+    "bodyBackground": "transparent",
+    "editorialAccent": "#347B40",
+    "highlightLine": "#82C38C",
+    "localDark": "#141413",
+    "localReverse": "#F3F2EE",
+    "localDarkAccent": "#82C38C",
+    "brandLightCanvasUsage": "Reference asset canvas only, not an article fill or a logo-derived grey",
+    "mutedUsage": "Neutral caption/source readability choice; not a colour extracted from the logo"
+  },
+  "typography": {
+    "zh": "PingFang SC",
+    "fallback": "system-ui, -apple-system, HarmonyOS Sans SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif",
+    "weights": [
+      400,
+      600,
+      650,
+      700
+    ],
+    "title": {
+      "size": 22,
+      "line": 31,
+      "scope": "preview of native WeChat title field, not body HTML"
+    },
+    "h2": {
+      "size": 24,
+      "line": 35,
+      "weight": 700
+    },
+    "body": {
+      "size": 17,
+      "line": 30
+    },
+    "caption": {
+      "size": 14,
+      "line": 22
+    },
+    "reference": {
+      "size": 12,
+      "line": 21.6
+    }
+  },
+  "spacing": {
+    "phoneWidthForReview": 390,
+    "phoneMinWidth": 320,
+    "side": 20,
+    "paragraph": 22,
+    "captionGap": 8,
+    "cardPadding": 16,
+    "chapterTop": 42,
+    "chapterPaddingTop": 22,
+    "chapterAfter": 26
+  },
+  "radius": {
+    "small": 12,
+    "large": 20
+  },
+  "content": {
+    "structure": "Follow the actual article; contents, chapter count, figures and reference count are dynamic.",
+    "optionalRoundupHeading": "一周 AI 进展",
+    "internalCorpusStatisticsInBody": false,
+    "writingStatus": "Pending later user feedback; do not imitate the source article prose."
+  },
+  "roundup": {
+    "featureTitle": {
+      "size": 23,
+      "line": 34,
+      "weight": 700
+    },
+    "briefTitle": {
+      "size": 18,
+      "line": 29,
+      "weight": 650
+    },
+    "sourceAndCaption": {
+      "size": 14,
+      "line": 22
+    },
+    "wholeItemCards": false,
+    "dateBasis": "publisher announcement date",
+    "sourceLinksPerPublisher": true
+  },
+  "wechat": {
+    "singleColumn": true,
+    "inlineCSS": true,
+    "scripts": false,
+    "externalFontsRequired": false,
+    "gridOrFlexRequired": false,
+    "fixedPixelContentWidth": false,
+    "platformControlsReadingBackground": true,
+    "previewBackground": "#FFFFFF",
+    "bodySetsBackground": false,
+    "nativeTitleAndAccountOutsideContent": true
+  },
+  "prohibited": [
+    "additional accent colours outside the defined green editorial hierarchy",
+    "retypeset or altered wordmark",
+    "every paragraph in a card",
+    "nested cards",
+    "large isolated hype numbers",
+    "unrelated hardware",
+    "fabricated social screenshots",
+    "internal pipeline language in public body",
+    "full-article brand-coloured background or website masthead",
+    "treating a brand-kit canvas as a colour mandated by the logo",
+    "copying reference PART labels and large pale-teal heading cards",
+    "repeating the opening paragraph as a summary"
+  ],
+  "editorialTypography": {
+    "contents": "white/transparent inset, near-black outline; generate labels from actual chapter titles with dynamic numbering",
+    "lead": "opening paragraph appears once, no fill, brand-green left border",
+    "chapter": "rounded near-black numeric tags and bold title; chapter count follows the article, no fixed four-part cap",
+    "bodyEmphasis": "selective strong phrases chosen from actual copy, 3px #82C38C bottom border; short phrases stay together; no fixed emphasis count",
+    "briefGroups": "Local near-black heading blocks, light group title and #82C38C label; count follows actual groups.",
+    "caption": "14px functional neutral grey, distinct from group headings",
+    "scope": "in-article typography; native title, account and date remain outside the body"
+  },
+  "approvedAt": "2026-11-03",
+  "writingStatus": "pending-revision",
+  "renderer": {
+    "script": "scripts/render.mjs",
+    "dateTimezone": "Asia/Singapore",
+    "outputs": [
+      "article.wechat.html",
+      "article-preview.html",
+      "research/article-conversion.json",
+      "research/article-layout-check.json"
+    ]
+  },
+  "covers": {
+    "ratios": [
+      "2.35:1",
+      "1:1"
+    ],
+    "checks": [
+      "Complete approved title and identifiable subject in both crops",
+      "Review 200px and 96px square thumbnails"
+    ],
+    "layout": "Adapt to content using the same identity; the 500-client example is not a fixed cover template."
+  }
+}

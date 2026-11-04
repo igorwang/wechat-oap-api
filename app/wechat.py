@@ -14,7 +14,7 @@ class WeChatClient:
     """Async WeChat 服务端 API client with token caching.
 
     Caching strategy:
-    * in-process `_token` + `_token_expiry` (60s safety margin)
+    * stable-token credentials, with a 60s expiry safety margin
     * optional file persistence at `settings.wechat_token_cache_path`
     * `asyncio.Lock` to dedupe concurrent refreshes
     * transparent retry once on 40001 / 42001
@@ -57,11 +57,19 @@ class WeChatClient:
             data = json.loads(self._cache_path.read_text())
         except (OSError, json.JSONDecodeError):
             return
-        if data.get("appid") != settings.wechat_appid:
-            return  # credentials changed, ignore stale cache
+        if not isinstance(data, dict):
+            return
+        if (
+            data.get("appid") != settings.wechat_appid
+            or data.get("token_source") != "stable_token"
+        ):
+            return  # Ignore another account's cache and pre-migration legacy tokens.
         token = data.get("access_token")
-        expiry = float(data.get("expiry", 0))
-        if token and time.time() < expiry - 60:
+        try:
+            expiry = float(data.get("expiry", 0))
+        except (TypeError, ValueError):
+            return
+        if isinstance(token, str) and token and time.time() < expiry - 60:
             self._token = token
             self._token_expiry = expiry
 
@@ -70,6 +78,7 @@ class WeChatClient:
             return
         payload = {
             "appid": settings.wechat_appid,
+            "token_source": "stable_token",
             "access_token": self._token,
             "expiry": self._token_expiry,
         }
@@ -77,6 +86,27 @@ class WeChatClient:
             self._cache_path.write_text(json.dumps(payload))
         except OSError:
             pass
+
+    def _cache_stable_token(self, data: dict[str, Any]) -> str:
+        token = data.get("access_token")
+        if not isinstance(token, str) or not token:
+            raise HTTPException(
+                502,
+                detail={
+                    "errcode": data.get("errcode"),
+                    "errmsg": data.get("errmsg", "Invalid WeChat token response"),
+                },
+            )
+        try:
+            ttl = int(data["expires_in"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(502, "Invalid WeChat token expiry") from None
+        if ttl <= 0:
+            raise HTTPException(502, "Invalid WeChat token expiry")
+        self._token = token
+        self._token_expiry = time.time() + ttl
+        self._save_cached_token()
+        return token
 
     # ---------------- token endpoints ----------------
 
@@ -99,21 +129,34 @@ class WeChatClient:
         r = await self._client.post("/cgi-bin/stable_token", json=body)
         return r.json()
 
-    async def get_cached_access_token(self) -> str:
+    async def get_stable_token(self, force_refresh: bool = False) -> dict[str, Any]:
+        """Explicit token requests also update the business cache under its lock."""
+        async with self._lock:
+            if force_refresh:
+                self._invalidate_token()
+            data = await self.fetch_stable_token(force_refresh=force_refresh)
+            if "access_token" in data:
+                self._cache_stable_token(data)
+            return data
+
+    async def get_cached_access_token(self, *, rejected_token: str | None = None) -> str:
         now = time.time()
-        if self._token and now < self._token_expiry - 60:
+        if rejected_token is None and self._token and now < self._token_expiry - 60:
             return self._token
         async with self._lock:
             now = time.time()
-            if self._token and now < self._token_expiry - 60:
+            if (
+                self._token
+                and now < self._token_expiry - 60
+                and self._token != rejected_token
+            ):
                 return self._token
-            data = await self.fetch_access_token()
-            if "access_token" not in data:
-                raise HTTPException(502, f"WeChat token error: {data}")
-            self._token = data["access_token"]
-            self._token_expiry = now + int(data.get("expires_in", 7200))
-            self._save_cached_token()
-            return self._token
+            # A late failure for OLD must not invalidate NEW refreshed by another caller.
+            force_refresh = rejected_token is not None and self._token == rejected_token
+            if force_refresh:
+                self._invalidate_token()
+            data = await self.fetch_stable_token(force_refresh=force_refresh)
+            return self._cache_stable_token(data)
 
     def _invalidate_token(self) -> None:
         self._token = None
@@ -126,6 +169,40 @@ class WeChatClient:
 
     # ---------------- generic helpers ----------------
 
+    async def call_response(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Keep upstream bytes; retry rejected credentials once, including JSON errors
+        labeled text/plain by WeChat's media endpoints.
+        """
+        rejected_token = None
+        for attempt in range(2):
+            token = await self.get_cached_access_token(rejected_token=rejected_token)
+            q = {"access_token": token, **(params or {})}
+            response = await self._client.request(
+                method, path, params=q, json=json, data=data, files=files
+            )
+            try:
+                payload = response.json()
+            except ValueError:
+                return response
+            if (
+                isinstance(payload, dict)
+                and payload.get("errcode") in (40001, 42001)
+                and attempt == 0
+            ):
+                rejected_token = token
+                continue
+            return response
+        return response
+
     async def call_json(
         self,
         method: str,
@@ -134,18 +211,9 @@ class WeChatClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """JSON-based authenticated call with auto token refresh on 40001/42001."""
-        data: dict[str, Any] = {}
-        for attempt in range(2):
-            token = await self.get_cached_access_token()
-            q = {"access_token": token, **(params or {})}
-            r = await self._client.request(method, path, params=q, json=json)
-            data = r.json()
-            if data.get("errcode") in (40001, 42001) and attempt == 0:
-                self._invalidate_token()
-                continue
-            return data
-        return data
+        """JSON-based authenticated call with one credential-recovery attempt."""
+        response = await self.call_response(method, path, params=params, json=json)
+        return response.json()
 
     async def call_multipart(
         self,
@@ -157,17 +225,8 @@ class WeChatClient:
         files: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """multipart/form-data authenticated call (for file uploads)."""
-        resp: dict[str, Any] = {}
-        for attempt in range(2):
-            token = await self.get_cached_access_token()
-            q = {"access_token": token, **(params or {})}
-            r = await self._client.request(method, path, params=q, data=data, files=files)
-            resp = r.json()
-            if resp.get("errcode") in (40001, 42001) and attempt == 0:
-                self._invalidate_token()
-                continue
-            return resp
-        return resp
+        response = await self.call_response(method, path, params=params, data=data, files=files)
+        return response.json()
 
     # ---------------- basic endpoints ----------------
 

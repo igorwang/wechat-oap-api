@@ -1,0 +1,22 @@
+{
+  "sourceKit": "Feyn-SurviAGI-C-brand-kit-20261030.zip",
+  "approvedFor": "SurviAGI WeChat editorial design",
+  "approvedAt": "2026-11-03",
+  "defaultFile": "surviagi-horizontal-en-light.png",
+  "files": [
+    {
+      "path": "surviagi-horizontal-en-light.png",
+      "sha256": "5ced5ac36225cdc4d3de2edbb94ecbcd767010a64ea2e811df1151d3e45dc513",
+      "originalPath": "02-SurviAGI/horizontal/en/surviagi-horizontal-en-for-light-transparent.png"
+    },
+    {
+      "path": "surviagi-horizontal-en-light.svg",
+      "sha256": "c952630af3d5b3b00082d65c72a083df039e6d8d7d2e12474f2ace452d167f07",
+      "originalPath": "02-SurviAGI/horizontal/en/surviagi-horizontal-en-for-light-transparent.svg"
+    }
+  ],
+  "renderWidthPx": 300,
+  "transparent": true,
+  "visualReferencesOnly": true,
+  "proseStatus": "pending-revision; source article is not an approved writing example"
+}

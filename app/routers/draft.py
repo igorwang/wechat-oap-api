@@ -1,13 +1,25 @@
 """草稿管理与商品卡片 (draft + product card)."""
 
-from typing import Any
+from typing import Any, Literal, Self
 
 from fastapi import APIRouter
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..wechat import wechat_client
 
 router = APIRouter(prefix="/wechat/draft", tags=["wechat"])
+
+
+class PictureItem(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    image_media_id: str = Field(..., min_length=1)
+
+
+class PictureInfo(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    image_list: list[PictureItem] = Field(..., min_length=1, max_length=20)
 
 
 class Article(BaseModel):
@@ -15,15 +27,25 @@ class Article(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    article_type: Literal["news", "newspic"] = "news"
     title: str
     author: str | None = None
     digest: str | None = None
     content: str
     content_source_url: str | None = None
-    thumb_media_id: str
+    thumb_media_id: str | None = None
+    image_info: PictureInfo | None = None
     show_cover_pic: int | None = 0
     need_open_comment: int | None = 0
     only_fans_can_comment: int | None = 0
+
+    @model_validator(mode="after")
+    def validate_media(self) -> Self:
+        if self.article_type == "news" and not self.thumb_media_id:
+            raise ValueError("thumb_media_id is required for news articles")
+        if self.article_type == "newspic" and self.image_info is None:
+            raise ValueError("image_info is required for newspic articles")
+        return self
 
 
 class AddBody(BaseModel):
