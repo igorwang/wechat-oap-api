@@ -23,11 +23,14 @@ class Settings(BaseSettings):
     cs_aes_key: str = ""
     cs_cursor_path: str = ".cs_cursor.json"
     # PostgreSQL，形如 postgresql+asyncpg://user:pass@host:5432/db
-    # 留空则不落库（机器人仍可正常收发消息）
+    # AI 问答需要数据库记录每日额度。固定回复不依赖数据库。
     database_url: str = ""
     cs_welcome_text: str = "您好，我是智能客服斐恩(Feyn)，请问有什么可以帮您？"
-    # 未关注公众号的客户只收到引导关注的二维码，不接入 AI（判据取自公众号关注者名单）
+    # AI 问答仅对已关注公众号的客户开放（判据取自公众号关注者名单）。
     cs_require_follow: bool = True
+    # Feyn OS 的产品介绍与群码只在指定的客服账号启用。
+    cs_group_qr_open_kfid: str = ""
+    cs_group_qr_path: str = ""
 
     # DeepSeek — 机器人回复所用 LLM
     deepseek_api_key: str = ""

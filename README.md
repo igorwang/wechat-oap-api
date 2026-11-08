@@ -65,6 +65,18 @@ scripts/docker-push.sh v0.2.0   # 或手动指定 tag
 
 AppID、AppSecret、IP 白名单和接口权限在[微信开发者平台](https://developers.weixin.qq.com/platform/)管理，入口以[官方迁移说明](https://developers.weixin.qq.com/doc/subscription/guide/dev/migration.html)为准。
 
+### Feyn OS 微信客服
+
+1. 在企业微信「工作台 → 客户群 → 加入群聊」生成入群二维码，下载 PNG 或 JPEG。普通微信群也可使用群二维码，需要在到期前换图。
+2. 在 `.env` 中填入目标微信客服账号的 `CS_GROUP_QR_OPEN_KFID`。Compose 部署时，把图片存到服务所在主机的 `data/customer-service/group.png`，确保容器用户（UID 10001）可读取，再设置 `CS_GROUP_QR_PATH=/data/customer-service/group.png`。直接用 uv 运行时，填本机图片的绝对路径。两项都填才会为该账号启用群码回复。
+3. 启动包含这项功能的版本。用普通微信账号打开客服会话，发送「产品」查看介绍，再发送「进群」并长按收到的码，确认进入目标群。「加群」「加入群聊」也会发码。固定指令无需关注公众号，也不占 AI 聊天额度。
+
+更换客服发出的群码时，替换 `CS_GROUP_QR_PATH` 指向的文件。后续回复会读取新图，无需重启。
+
+公众号文章用的 [Feyn OS 公开群二维码](app/static/feyn-group-qrcode.png) 随镜像发布，路径为 `/static/feyn-group-qrcode.png`，可直接下载。写文章时可复用[微信正文图片](https://mmbiz.qpic.cn/sz_mmbiz_png/CPOEHPabBUDNQd6a9XdwZtJI3gc4xs8YFLYXht72tPFllC3yqDlPicto2gLJLL9nuCKeDq8h43icIRm3A95ibbC8gWwts6VoCFZMrWuEfXv9bw/0?from=appmsg)，或用 `bash skills/wechat-api/scripts/wechat.sh upload-inline app/static/feyn-group-qrcode.png` 取得微信图片地址。换码时同步更新仓库图片并重新上传正文素材。已发表文章中的二维码仍是发表时的图片。
+
+客服直接回复 [Feyn OS 知识库](app/customer_service/feyn_knowledge.md) 中命中的常见问题，模型也参考同一份知识库回答其他问法。改动知识库后，重启新版本以载入内容。AI 问答按客户 ID 每天最多处理 50 条消息，按北京时间零点重置。额度保存在数据库中，数据库不可用时固定回复仍可使用，AI 问答暂停。模型继续通过 `DEEPSEEK_MODEL`、`DEEPSEEK_API_BASE` 和 `DEEPSEEK_API_KEY` 配置。
+
 ### 稳定凭据与永久素材下载
 
 内部缓存默认调用 `POST /cgi-bin/stable_token`，普通获取使用 `force_refresh=false`，过期时间使用响应的 `expires_in`。收到 40001／42001 时，仅在被拒绝的 Token 仍为当前缓存时强制刷新，并重试原请求一次；并发的旧请求复用已刷新的 Token。手动调用 `/wechat/stable-token` 也会同步业务缓存。
@@ -91,7 +103,7 @@ HTTP 下载原始文件时，在同一接口添加查询参数 `?response_format
 X-API-Key: some-long-random-string
 ```
 
-放行路径（不需要 key）：`/healthz`, `/docs`, `/redoc`, `/openapi.json`。
+放行路径（不需要 key）：`/healthz`, `/docs`, `/redoc`, `/openapi.json`, `/static/*`。
 
 服务端 `API_KEY` 与客户端 `WECHAT_API_KEY` 使用同一个值：服务端负责校验，客户端脚本和 MCP 负责发送。`WECHAT_OAP_API_KEY` 是旧客户端变量名；新配置统一使用 `WECHAT_API_KEY`。HTTP 脚本仍支持旧名回退，两者同时设置时以新名为准。原先仅导出旧变量的 MCP 客户端，请将相同值迁到 `WECHAT_API_KEY`，再重载配置。
 

@@ -12,6 +12,7 @@ from app.config import settings
 from app.logging_config import setup_logging
 from app.customer_service.bot import support_bot
 from app.customer_service.client import customer_service_client
+from app.customer_service.quota import CustomerQuotaStore
 from app.customer_service.store import CustomerStore
 from app.follower_store import FollowerStore
 from app.followers import follower_directory
@@ -30,6 +31,7 @@ from app.wechat import wechat_client
 async def lifespan(app: FastAPI):
     setup_logging()
     database = await init_database()
+    support_bot.quota = CustomerQuotaStore(database.sessions) if database else None
     if database:
         support_bot.store = CustomerStore(database.sessions)
         follower_directory.store = FollowerStore(database.sessions)

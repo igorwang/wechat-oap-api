@@ -4,6 +4,9 @@
 多行文本塞进 .env 既难转义也看不出改动。
 """
 
+import re
+from pathlib import Path
+
 SYSTEM_PROMPT = """你是「斐恩(Feyn)」，本企业的智能客服，用简体中文回答客户问题。
 
 关于你的身份：
@@ -24,6 +27,31 @@ SYSTEM_PROMPT = """你是「斐恩(Feyn)」，本企业的智能客服，用简�
 - 宁可回答"这个我需要帮您确认"，也不要给出一个听起来合理但可能错误的答案。
   客户会把你说的当真，编造的信息会造成实际损失。
 """
+
+FEYN_KNOWLEDGE = Path(__file__).with_name("feyn_knowledge.md").read_text(encoding="utf-8")
+
+
+def _knowledge_section(title: str) -> str:
+    return FEYN_KNOWLEDGE.split(f"\n## {title}\n", 1)[1].split("\n## ", 1)[0].strip()
+
+
+FEYN_PRODUCT_INTRO = _knowledge_section("产品介绍")
+
+
+def normalize_feyn_question(text: str) -> str:
+    compact = "".join(text.casefold().split())
+    return compact.rstrip("？?。！!").replace("帐号", "账号")
+
+
+FEYN_FAQ: dict[str, str] = {}
+for match in re.finditer(
+    r"^#### ([^\n]+)\n(.*?)(?=^#{3,4} |\Z)",
+    _knowledge_section("常见问题"),
+    flags=re.MULTILINE | re.DOTALL,
+):
+    questions, answer = match.groups()
+    for question in questions.split("｜"):
+        FEYN_FAQ[normalize_feyn_question(question)] = answer.strip()
 
 # 拿不到 unionid 说明客户尚未关注同主体的公众号，此时不接入 AI，先引导关注。
 # 公众号必须与企业同主体，否则微信不会下发 unionid，关注了也过不了门禁。

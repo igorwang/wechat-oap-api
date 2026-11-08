@@ -32,6 +32,8 @@ services:
       - token-cache:/data
       # 嵌套挂载：/data 走命名卷，/data/log 单独绑到宿主机目录
       - ./data/log:/data/log
+      # 私有群二维码留在宿主机，应用只读。
+      - ./data/customer-service:/data/customer-service:ro
     healthcheck:
       test:
         - CMD

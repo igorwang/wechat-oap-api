@@ -1,6 +1,7 @@
 """SupportBot — 回调事件驱动的机器人编排：拉取消息 → DeepSeek 生成 → 客服回复."""
 
 import json
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -8,6 +9,7 @@ import respx
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.config import settings
 from app.customer_service.bot import SupportBot
 from app.customer_service.client import CustomerServiceClient
 from app.customer_service.models import Base
@@ -15,6 +17,10 @@ from app.customer_service.store import CustomerStore
 
 QY = "https://qyapi.weixin.qq.com"
 DS = "https://api.deepseek.com"
+
+
+def _available_quota():
+    return Mock(try_consume=AsyncMock(return_value=True))
 
 
 @pytest.fixture
@@ -58,6 +64,7 @@ def bot(client, perception):
         system_prompt="你是客服",
         welcome_text="欢迎咨询",
         perception=perception,
+        quota=_available_quota(),
         # 关注门禁单独测（见文件末尾），这里只关心消息收发本身
         require_follow=False,
     )
@@ -162,7 +169,7 @@ async def test_enter_session_records_customer_profile(client, store):
 
 
 async def test_text_message_records_sender_and_counts(client, store):
-    bot = SupportBot(client, api_key="k", api_base=DS, store=store)
+    bot = SupportBot(client, api_key="k", api_base=DS, store=store, quota=_available_quota())
     async with respx.mock as mock:
         _mock_qy_token(mock)
         _mock_sync(mock, [{
@@ -415,6 +422,7 @@ def _gated_bot(client, followers, store=None, perception=None):
     return SupportBot(
         client, api_key="k", api_base=DS, system_prompt="你是客服",
         store=store, require_follow=True, followers=followers, perception=perception,
+        quota=_available_quota(),
     )
 
 
@@ -430,6 +438,182 @@ def _mock_kf_customer(mock, unionid):
 def _customer_msg(content="怎么退货？", msgid="m1"):
     return {"msgid": msgid, "open_kfid": "wk1", "external_userid": "u1",
             "origin": 3, "msgtype": "text", "text": {"content": content}}
+
+
+async def test_fixed_feyn_replies_still_work_after_ai_quota_is_exhausted(
+    client, perception, monkeypatch, tmp_path
+):
+    qr = tmp_path / "group.png"
+    qr.write_bytes(b"test-group-qr")
+    monkeypatch.setattr(settings, "cs_group_qr_path", str(qr))
+    monkeypatch.setattr(settings, "cs_group_qr_open_kfid", "wk1")
+    quota = Mock(try_consume=AsyncMock(return_value=False))
+    bot = SupportBot(client, api_base=DS, require_follow=False, perception=perception, quota=quota)
+    async with respx.mock(assert_all_called=False) as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [
+            _customer_msg("产品", "product"),
+            _customer_msg("团队怎么用AI？", "team-faq"),
+            _customer_msg("共享账号？", "shared-faq"),
+            _customer_msg("怎么内嵌？", "embed-faq"),
+            _customer_msg("怎么自我进步？", "improve-faq"),
+            _customer_msg("进群", "group"),
+            _voice_msg(),
+        ])
+        mock.post(f"{QY}/cgi-bin/media/upload").respond(
+            200, json={"errcode": 0, "media_id": "GROUP_MID"}
+        )
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").respond(200, json={"errcode": 0})
+        media = _mock_media_get(mock, AMR_BYTES, "audio/amr")
+        llm = _mock_deepseek(mock, "不应调用")
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 7
+
+        replies = [json.loads(call.request.content) for call in send.calls]
+        assert all(item in replies[0]["text"]["content"] for item in ("AI 电脑", "咨询", "FDE。"))
+        assert "一份真实样本" in replies[1]["text"]["content"]
+        assert "管理员统一管理" in replies[2]["text"]["content"]
+        assert "填完一张表" in replies[3]["text"]["content"]
+        assert "用原来的任务复测" in replies[4]["text"]["content"]
+        assert all("###" not in reply["text"]["content"] for reply in replies[:5])
+        assert replies[5]["image"]["media_id"] == "GROUP_MID"
+        assert "50 条" in replies[-1]["text"]["content"]
+        quota.try_consume.assert_awaited_once_with("u1", limit=50)
+        assert not media.called
+        assert not llm.called
+
+
+async def test_feyn_customer_question_uses_reviewed_faq_as_context(client, monkeypatch):
+    monkeypatch.setattr(settings, "cs_group_qr_open_kfid", "wk1")
+    quota = _available_quota()
+    bot = SupportBot(client, api_base=DS, require_follow=False, quota=quota)
+    question = "我们团队想先用 AI 处理会议纪要，有什么建议？"
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_customer_msg(question)])
+        llm = _mock_deepseek(mock, "先找一份样本，跑一遍再比对。")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").respond(200, json={"errcode": 0})
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+
+        messages = json.loads(llm.calls.last.request.content)["messages"]
+        assert "拿一份真实样本" in messages[0]["content"]
+        assert messages[-1]["content"] == question
+        assert json.loads(send.calls.last.request.content)["text"]["content"] == "先找一份样本，跑一遍再比对。"
+        quota.try_consume.assert_awaited_once_with("u1", limit=50)
+
+
+async def test_group_qr_is_not_advertised_or_sent_by_another_account(client, monkeypatch, tmp_path):
+    qr = tmp_path / "group.png"
+    qr.write_bytes(b"test-group-qr")
+    monkeypatch.setattr(settings, "cs_group_qr_path", str(qr))
+    monkeypatch.setattr(settings, "cs_group_qr_open_kfid", "feyn-kf")
+    bot = SupportBot(
+        client, api_base=DS, welcome_text="欢迎咨询", require_follow=False,
+        quota=_available_quota(),
+    )
+
+    async with respx.mock(assert_all_called=False) as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [
+            {"msgid": "other-welcome", "msgtype": "event", "event": {
+                "event_type": "enter_session", "open_kfid": "wk1",
+                "external_userid": "u1", "welcome_code": "WC1",
+            }},
+            _customer_msg("进群", "other-message"),
+        ])
+        welcome = mock.post(f"{QY}/cgi-bin/kf/send_msg_on_event").respond(200, json={"errcode": 0})
+        upload = mock.post(f"{QY}/cgi-bin/media/upload").respond(
+            200, json={"errcode": 0, "media_id": "GROUP_MID"}
+        )
+        _mock_deepseek(mock, "欢迎咨询本客服")
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").respond(200, json={"errcode": 0})
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 2
+        assert json.loads(welcome.calls.last.request.content)["text"]["content"] == "欢迎咨询"
+        assert not upload.called
+        assert json.loads(send.calls.last.request.content)["text"]["content"] == "欢迎咨询本客服"
+
+
+async def test_join_keyword_sends_group_qr_before_follow_gate(client, followers, monkeypatch, tmp_path):
+    qr = tmp_path / "group.png"
+    qr.write_bytes(b"test-group-qr")
+    monkeypatch.setattr(settings, "cs_group_qr_path", str(qr))
+    monkeypatch.setattr(settings, "cs_group_qr_open_kfid", "wk1")
+    bot = _gated_bot(client, followers)
+    async with respx.mock(assert_all_called=False) as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_customer_msg("进群", "join1"), _customer_msg(" 加入群聊 ", "join2")])
+        profile = _mock_kf_customer(mock, "u_stranger")
+        _mock_oa(mock, follower_unionids=["u_someone_else"])
+        llm = _mock_deepseek(mock, "普通问答")
+        upload = mock.post(f"{QY}/cgi-bin/media/upload").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "media_id": "GROUP_MID"})
+        )
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(
+            return_value=httpx.Response(200, json={"errcode": 0, "msgid": "r1"})
+        )
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 2
+
+        assert not profile.called
+        assert not llm.called
+        assert upload.call_count == 1
+        assert b"test-group-qr" in upload.calls.last.request.content
+        images = [
+            body for call in send.calls
+            if (body := json.loads(call.request.content))["msgtype"] == "image"
+        ]
+        assert len(images) == 2
+        for body in images:
+            assert body["touser"] == "u1"
+            assert body["open_kfid"] == "wk1"
+            assert body["image"]["media_id"] == "GROUP_MID"
+
+        replacement = tmp_path / "replacement.png"
+        replacement.write_bytes(b"new-group-qr")
+        replacement.replace(qr)
+        _mock_sync(mock, [_customer_msg("加群", "join3")])
+        upload.mock(return_value=httpx.Response(200, json={"errcode": 0, "media_id": "NEW_MID"}))
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+        assert upload.call_count == 2
+        assert b"new-group-qr" in upload.calls.last.request.content
+        image = json.loads(send.calls[-2].request.content)
+        assert image["image"]["media_id"] == "NEW_MID"
+
+
+async def test_invalid_group_media_gets_text_fallback_and_reuploads_on_retry(
+    client, monkeypatch, tmp_path
+):
+    qr = tmp_path / "group.png"
+    qr.write_bytes(b"test-group-qr")
+    monkeypatch.setattr(settings, "cs_group_qr_path", str(qr))
+    monkeypatch.setattr(settings, "cs_group_qr_open_kfid", "wk1")
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_customer_msg("进群")])
+        upload = mock.post(f"{QY}/cgi-bin/media/upload").mock(side_effect=[
+            httpx.Response(200, json={"errcode": 0, "media_id": "GROUP_MID"}),
+            httpx.Response(200, json={"errcode": 0, "media_id": "RENEWED_MID"}),
+        ])
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").mock(side_effect=[
+            httpx.Response(200, json={"errcode": 40007, "errmsg": "invalid media_id"}),
+            httpx.Response(200, json={"errcode": 0, "msgid": "r1"}),
+            httpx.Response(200, json={"errcode": 0, "msgid": "r2"}),
+            httpx.Response(200, json={"errcode": 0, "msgid": "r3"}),
+        ])
+
+        bot = SupportBot(client)
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+        sent = json.loads(send.calls.last.request.content)
+        assert sent["msgtype"] == "text"
+        assert "暂时无法发送" in sent["text"]["content"]
+
+        _mock_sync(mock, [_customer_msg("进群", "retry")])
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+        assert upload.call_count == 2
+        assert json.loads(send.calls[-2].request.content)["image"]["media_id"] == "RENEWED_MID"
 
 
 async def test_non_follower_gets_qrcode_instead_of_llm(client, followers):

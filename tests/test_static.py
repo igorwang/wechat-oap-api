@@ -13,15 +13,23 @@ def client():
         yield c
 
 
-def test_qrcode_is_served(client):
-    r = client.get("/static/qrcode-official-account.jpg")
+@pytest.mark.parametrize(
+    ("filename", "content_type", "signature"),
+    [
+        ("qrcode-official-account.jpg", "image/jpeg", b"\xff\xd8"),
+        ("feyn-group-qrcode.png", "image/png", b"\x89PNG\r\n\x1a\n"),
+    ],
+)
+def test_qrcode_is_served(client, filename, content_type, signature):
+    r = client.get(f"/static/{filename}")
     assert r.status_code == 200
-    assert r.headers["content-type"] == "image/jpeg"
-    assert r.content[:2] == b"\xff\xd8", "应是 JPEG 内容"
+    assert r.headers["content-type"] == content_type
+    assert r.content.startswith(signature)
 
 
-def test_static_is_public_even_when_api_key_enabled(client, monkeypatch):
+@pytest.mark.parametrize("filename", ["qrcode-official-account.jpg", "feyn-group-qrcode.png"])
+def test_static_is_public_even_when_api_key_enabled(client, monkeypatch, filename):
     """静态资源要能被微信/浏览器直接取用，不该被 API key 拦住."""
     monkeypatch.setattr(settings, "api_key", "sekret")
-    r = client.get("/static/qrcode-official-account.jpg")
+    r = client.get(f"/static/{filename}")
     assert r.status_code == 200
