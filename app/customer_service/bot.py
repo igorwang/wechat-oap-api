@@ -31,7 +31,10 @@ from .store import CustomerStore
 
 logger = logging.getLogger(__name__)
 
-_QR_PATH = Path(__file__).resolve().parent.parent / "static" / "qrcode-official-account.jpg"
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+_QR_PATH = _STATIC_DIR / "qrcode-official-account.jpg"
+# 群码默认用随镜像发布的那张（与公众号文章同一张）；CS_GROUP_QR_PATH 可覆盖
+_DEFAULT_GROUP_QR_PATH = _STATIC_DIR / "feyn-group-qrcode.png"
 # 微信临时素材 3 天失效，留一天余量
 _QR_MEDIA_TTL = 2 * 24 * 3600
 _JOIN_GROUP_KEYWORDS = {"进群", "加群", "加入群聊"}
@@ -102,7 +105,7 @@ class SupportBot:
         self._followers = followers or follower_directory
         self._qr_media_cache: dict[Path, tuple[tuple[int, int], float, str]] = {}
         group_qr_path = settings.cs_group_qr_path.strip()
-        self._group_qr_path = Path(group_qr_path) if group_qr_path else None
+        self._group_qr_path = Path(group_qr_path) if group_qr_path else _DEFAULT_GROUP_QR_PATH
         self._api_key = api_key if api_key is not None else settings.deepseek_api_key
         self._api_base = api_base or settings.deepseek_api_base
         self._model = model or settings.deepseek_model
@@ -286,10 +289,7 @@ class SupportBot:
                     "👋 进入会话 from=%s scene=%r，发送欢迎语",
                     event.get("external_userid"), event.get("scene", ""),
                 )
-                welcome_text = self._welcome_text
-                if self._group_qr_path:
-                    welcome_text += "\n想进一步聊，回复「进群」。"
-                await self._client.send_welcome(code=code, content=welcome_text)
+                await self._client.send_welcome(code=code, content=self._welcome_text)
                 return True
             return False
         # 3 = 客户发来的消息；其余是系统事件或客服自己发的，回它就成了自问自答
@@ -313,14 +313,9 @@ class SupportBot:
                 )
                 return True
             if content in _JOIN_GROUP_KEYWORDS:
-                if self._group_qr_path:
-                    await self._send_group_invitation(
-                        self._group_qr_path, touser=external_userid, open_kfid=open_kfid
-                    )
-                else:
-                    await self._client.send_text(
-                        touser=external_userid, open_kfid=open_kfid, content="入群入口暂未开放。"
-                    )
+                await self._send_group_invitation(
+                    self._group_qr_path, touser=external_userid, open_kfid=open_kfid
+                )
                 return True
         # 门禁必须在识别之前：未关注的客户不该花掉一次 ASR/视觉调用
         if self._require_follow and not await self._is_follower(

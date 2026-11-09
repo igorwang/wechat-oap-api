@@ -67,11 +67,9 @@ AppID、AppSecret、IP 白名单和接口权限在[微信开发者平台](https:
 
 ### Feyn OS 微信客服
 
-1. 在企业微信「工作台 → 客户群 → 加入群聊」生成入群二维码，下载 PNG 或 JPEG。普通微信群也可使用群二维码，需要在到期前换图。
-2. Compose 部署时，把图片存到服务所在主机的 `data/customer-service/group.png`，确保容器用户（UID 10001）可读取，再设置 `CS_GROUP_QR_PATH=/data/customer-service/group.png`。直接用 uv 运行时，填本机图片的绝对路径。设置后即启用群码回复。
-3. 启动包含这项功能的版本。用普通微信账号打开客服会话，发送「产品」查看介绍，再发送「进群」并长按收到的码，确认进入目标群。「加群」「加入群聊」也会发码。固定指令无需关注公众号，也不占 AI 聊天额度。
-
-更换客服发出的群码时，替换 `CS_GROUP_QR_PATH` 指向的文件。后续回复会读取新图，无需重启。
+1. 「进群」默认发送镜像内置的 [Feyn OS 公开群二维码](app/static/feyn-group-qrcode.png)，无需额外配置。换码时更新这张图并重新打镜像。
+2. 如需不重打镜像就换码：把图片放到宿主机 `data/customer-service/group.png`（容器用户 UID 10001 可读），设置 `CS_GROUP_QR_PATH=/data/customer-service/group.png`。之后替换该文件即可，无需重启。
+3. 用普通微信账号打开客服会话，发送「产品」查看介绍，再发送「进群」并长按收到的码，确认进入目标群。「加群」「加入群聊」也会发码。固定指令无需关注公众号，也不占 AI 聊天额度。
 
 公众号文章用的 [Feyn OS 公开群二维码](app/static/feyn-group-qrcode.png) 随镜像发布，路径为 `/static/feyn-group-qrcode.png`，可直接下载。写文章时可复用[微信正文图片](https://mmbiz.qpic.cn/sz_mmbiz_png/CPOEHPabBUDNQd6a9XdwZtJI3gc4xs8YFLYXht72tPFllC3yqDlPicto2gLJLL9nuCKeDq8h43icIRm3A95ibbC8gWwts6VoCFZMrWuEfXv9bw/0?from=appmsg)，或用 `bash skills/wechat-api/scripts/wechat.sh upload-inline app/static/feyn-group-qrcode.png` 取得微信图片地址。换码时同步更新仓库图片并重新上传正文素材。已发表文章中的二维码仍是发表时的图片。
 

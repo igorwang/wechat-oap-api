@@ -504,24 +504,22 @@ async def test_feyn_customer_question_uses_reviewed_faq_as_context(client, monke
         quota.try_consume.assert_awaited_once_with("u1", limit=50)
 
 
-async def test_welcome_advertises_group_only_when_qr_configured(client, monkeypatch, tmp_path):
-    qr = tmp_path / "group.png"
-    qr.write_bytes(b"test-group-qr")
-    welcome_event = {"msgid": "w1", "msgtype": "event", "event": {
-        "event_type": "enter_session", "open_kfid": "wk1",
-        "external_userid": "u1", "welcome_code": "WC1",
-    }}
-    for path, expected in ((str(qr), "欢迎咨询\n想进一步聊，回复「进群」。"), ("", "欢迎咨询")):
-        monkeypatch.setattr(settings, "cs_group_qr_path", path)
-        bot = SupportBot(client, api_base=DS, welcome_text="欢迎咨询", require_follow=False)
-        async with respx.mock as mock:
-            _mock_qy_token(mock)
-            _mock_sync(mock, [welcome_event])
-            welcome = mock.post(f"{QY}/cgi-bin/kf/send_msg_on_event").respond(
-                200, json={"errcode": 0}
-            )
-            assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
-            assert json.loads(welcome.calls.last.request.content)["text"]["content"] == expected
+async def test_join_keyword_sends_bundled_group_qr_by_default(client):
+    from app.customer_service.bot import _DEFAULT_GROUP_QR_PATH
+
+    bot = SupportBot(client, api_base=DS, require_follow=False)
+    async with respx.mock as mock:
+        _mock_qy_token(mock)
+        _mock_sync(mock, [_customer_msg("进群")])
+        upload = mock.post(f"{QY}/cgi-bin/media/upload").respond(
+            200, json={"errcode": 0, "media_id": "GROUP_MID"}
+        )
+        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").respond(200, json={"errcode": 0})
+
+        assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+
+        assert _DEFAULT_GROUP_QR_PATH.read_bytes() in upload.calls.last.request.content
+        assert json.loads(send.calls[0].request.content)["image"]["media_id"] == "GROUP_MID"
 
 
 async def test_join_keyword_sends_group_qr_before_follow_gate(client, followers, monkeypatch, tmp_path):

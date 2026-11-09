@@ -27,10 +27,11 @@ class Settings(BaseSettings):
     database_url: str = ""
     cs_welcome_text: str = (
         "你好，我是 Feyn OS 客服斐恩(Feyn)。这里可以了解 AI 电脑、咨询和 FDE。\n回复「产品」看介绍，也可以直接问「团队怎么用 AI？」「怎么管理？」"
+        "\n想进一步聊，回复「进群」。"
     )
     # AI 问答仅对已关注公众号的客户开放（判据取自公众号关注者名单）。
     cs_require_follow: bool = True
-    # 群二维码图片路径；设置后启用「进群」发码。
+    # 「进群」发送的群二维码；留空用镜像内 app/static/feyn-group-qrcode.png。
     cs_group_qr_path: str = ""
 
     # DeepSeek — 机器人回复所用 LLM
