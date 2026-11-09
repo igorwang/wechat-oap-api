@@ -102,10 +102,7 @@ class SupportBot:
         self._followers = followers or follower_directory
         self._qr_media_cache: dict[Path, tuple[tuple[int, int], float, str]] = {}
         group_qr_path = settings.cs_group_qr_path.strip()
-        self._group_qr_open_kfid = settings.cs_group_qr_open_kfid.strip()
-        self._group_qr_path = (
-            Path(group_qr_path) if group_qr_path and self._group_qr_open_kfid else None
-        )
+        self._group_qr_path = Path(group_qr_path) if group_qr_path else None
         self._api_key = api_key if api_key is not None else settings.deepseek_api_key
         self._api_base = api_base or settings.deepseek_api_base
         self._model = model or settings.deepseek_model
@@ -114,11 +111,9 @@ class SupportBot:
             welcome_text if welcome_text is not None else settings.cs_welcome_text
         )
 
-    async def reply(self, text: str, *, feyn: bool = False) -> str:
+    async def reply(self, text: str) -> str:
         """调 DeepSeek chat/completions 生成回复文本."""
-        system_prompt = self._system_prompt
-        if feyn:
-            system_prompt += f"\n以下是 Feyn OS 可对外回答的知识库。\n\n{FEYN_KNOWLEDGE}"
+        system_prompt = f"{self._system_prompt}\n以下是 Feyn OS 可对外回答的知识库。\n\n{FEYN_KNOWLEDGE}"
         async with httpx.AsyncClient(base_url=self._api_base, timeout=60.0) as http:
             resp = await http.post(
                 "/chat/completions",
@@ -292,13 +287,8 @@ class SupportBot:
                     event.get("external_userid"), event.get("scene", ""),
                 )
                 welcome_text = self._welcome_text
-                if self._group_qr_open_kfid and event.get("open_kfid") == self._group_qr_open_kfid:
-                    welcome_text = (
-                        "你好，我是 Feyn OS 客服。这里可以了解 AI 电脑、咨询和 FDE。"
-                        "\n回复「产品」看介绍，也可以直接问「团队怎么用 AI？」「怎么管理？」"
-                    )
-                    if self._group_qr_path:
-                        welcome_text += "\n想进一步聊，回复「进群」。"
+                if self._group_qr_path:
+                    welcome_text += "\n想进一步聊，回复「进群」。"
                 await self._client.send_welcome(code=code, content=welcome_text)
                 return True
             return False
@@ -314,8 +304,7 @@ class SupportBot:
         await self._record(
             external_userid, open_kfid=open_kfid, bump_message_count=True
         )
-        is_feyn_account = bool(self._group_qr_open_kfid) and open_kfid == self._group_qr_open_kfid
-        if is_feyn_account and msgtype == "text":
+        if msgtype == "text":
             content = normalize_feyn_question(msg.get("text", {}).get("content", ""))
             fixed_reply = FEYN_PRODUCT_INTRO if content in _PRODUCT_KEYWORDS else FEYN_FAQ.get(content)
             if fixed_reply:
@@ -373,7 +362,7 @@ class SupportBot:
                 touser=external_userid, open_kfid=open_kfid, content=MEDIA_FALLBACK_TEXT
             )
             return True
-        answer = await self.reply(content, feyn=is_feyn_account)
+        answer = await self.reply(content)
         logger.info("🤖 已回复 to=%s content=%r", external_userid, answer[:100])
         await self._client.send_text(
             touser=external_userid, open_kfid=open_kfid, content=answer

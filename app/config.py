@@ -25,11 +25,12 @@ class Settings(BaseSettings):
     # PostgreSQL，形如 postgresql+asyncpg://user:pass@host:5432/db
     # AI 问答需要数据库记录每日额度。固定回复不依赖数据库。
     database_url: str = ""
-    cs_welcome_text: str = "您好，我是智能客服斐恩(Feyn)，请问有什么可以帮您？"
+    cs_welcome_text: str = (
+        "你好，我是 Feyn OS 客服斐恩(Feyn)。这里可以了解 AI 电脑、咨询和 FDE。\n回复「产品」看介绍，也可以直接问「团队怎么用 AI？」「怎么管理？」"
+    )
     # AI 问答仅对已关注公众号的客户开放（判据取自公众号关注者名单）。
     cs_require_follow: bool = True
-    # Feyn OS 的产品介绍与群码只在指定的客服账号启用。
-    cs_group_qr_open_kfid: str = ""
+    # 群二维码图片路径；设置后启用「进群」发码。
     cs_group_qr_path: str = ""
 
     # DeepSeek — 机器人回复所用 LLM

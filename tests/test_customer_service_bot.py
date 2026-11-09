@@ -105,7 +105,10 @@ async def test_text_message_gets_llm_reply(bot):
         assert handled == 1
         ds_req = json.loads(ds_route.calls.last.request.content)
         assert ds_req["model"] == "deepseek-chat"
-        assert ds_req["messages"][0] == {"role": "system", "content": "你是客服"}
+        system = ds_req["messages"][0]
+        assert system["role"] == "system"
+        assert system["content"].startswith("你是客服")
+        assert "Feyn OS 可对外回答的知识库" in system["content"]
         assert ds_req["messages"][-1] == {"role": "user", "content": "怎么退货？"}
         assert ds_route.calls.last.request.headers["authorization"] == "Bearer ds-test-key"
         sent = json.loads(send_route.calls.last.request.content)
@@ -446,7 +449,6 @@ async def test_fixed_feyn_replies_still_work_after_ai_quota_is_exhausted(
     qr = tmp_path / "group.png"
     qr.write_bytes(b"test-group-qr")
     monkeypatch.setattr(settings, "cs_group_qr_path", str(qr))
-    monkeypatch.setattr(settings, "cs_group_qr_open_kfid", "wk1")
     quota = Mock(try_consume=AsyncMock(return_value=False))
     bot = SupportBot(client, api_base=DS, require_follow=False, perception=perception, quota=quota)
     async with respx.mock(assert_all_called=False) as mock:
@@ -484,7 +486,6 @@ async def test_fixed_feyn_replies_still_work_after_ai_quota_is_exhausted(
 
 
 async def test_feyn_customer_question_uses_reviewed_faq_as_context(client, monkeypatch):
-    monkeypatch.setattr(settings, "cs_group_qr_open_kfid", "wk1")
     quota = _available_quota()
     bot = SupportBot(client, api_base=DS, require_follow=False, quota=quota)
     question = "我们团队想先用 AI 处理会议纪要，有什么建议？"
@@ -503,43 +504,30 @@ async def test_feyn_customer_question_uses_reviewed_faq_as_context(client, monke
         quota.try_consume.assert_awaited_once_with("u1", limit=50)
 
 
-async def test_group_qr_is_not_advertised_or_sent_by_another_account(client, monkeypatch, tmp_path):
+async def test_welcome_advertises_group_only_when_qr_configured(client, monkeypatch, tmp_path):
     qr = tmp_path / "group.png"
     qr.write_bytes(b"test-group-qr")
-    monkeypatch.setattr(settings, "cs_group_qr_path", str(qr))
-    monkeypatch.setattr(settings, "cs_group_qr_open_kfid", "feyn-kf")
-    bot = SupportBot(
-        client, api_base=DS, welcome_text="欢迎咨询", require_follow=False,
-        quota=_available_quota(),
-    )
-
-    async with respx.mock(assert_all_called=False) as mock:
-        _mock_qy_token(mock)
-        _mock_sync(mock, [
-            {"msgid": "other-welcome", "msgtype": "event", "event": {
-                "event_type": "enter_session", "open_kfid": "wk1",
-                "external_userid": "u1", "welcome_code": "WC1",
-            }},
-            _customer_msg("进群", "other-message"),
-        ])
-        welcome = mock.post(f"{QY}/cgi-bin/kf/send_msg_on_event").respond(200, json={"errcode": 0})
-        upload = mock.post(f"{QY}/cgi-bin/media/upload").respond(
-            200, json={"errcode": 0, "media_id": "GROUP_MID"}
-        )
-        _mock_deepseek(mock, "欢迎咨询本客服")
-        send = mock.post(f"{QY}/cgi-bin/kf/send_msg").respond(200, json={"errcode": 0})
-
-        assert await bot.process_event(token="EVT", open_kfid="wk1") == 2
-        assert json.loads(welcome.calls.last.request.content)["text"]["content"] == "欢迎咨询"
-        assert not upload.called
-        assert json.loads(send.calls.last.request.content)["text"]["content"] == "欢迎咨询本客服"
+    welcome_event = {"msgid": "w1", "msgtype": "event", "event": {
+        "event_type": "enter_session", "open_kfid": "wk1",
+        "external_userid": "u1", "welcome_code": "WC1",
+    }}
+    for path, expected in ((str(qr), "欢迎咨询\n想进一步聊，回复「进群」。"), ("", "欢迎咨询")):
+        monkeypatch.setattr(settings, "cs_group_qr_path", path)
+        bot = SupportBot(client, api_base=DS, welcome_text="欢迎咨询", require_follow=False)
+        async with respx.mock as mock:
+            _mock_qy_token(mock)
+            _mock_sync(mock, [welcome_event])
+            welcome = mock.post(f"{QY}/cgi-bin/kf/send_msg_on_event").respond(
+                200, json={"errcode": 0}
+            )
+            assert await bot.process_event(token="EVT", open_kfid="wk1") == 1
+            assert json.loads(welcome.calls.last.request.content)["text"]["content"] == expected
 
 
 async def test_join_keyword_sends_group_qr_before_follow_gate(client, followers, monkeypatch, tmp_path):
     qr = tmp_path / "group.png"
     qr.write_bytes(b"test-group-qr")
     monkeypatch.setattr(settings, "cs_group_qr_path", str(qr))
-    monkeypatch.setattr(settings, "cs_group_qr_open_kfid", "wk1")
     bot = _gated_bot(client, followers)
     async with respx.mock(assert_all_called=False) as mock:
         _mock_qy_token(mock)
@@ -589,7 +577,6 @@ async def test_invalid_group_media_gets_text_fallback_and_reuploads_on_retry(
     qr = tmp_path / "group.png"
     qr.write_bytes(b"test-group-qr")
     monkeypatch.setattr(settings, "cs_group_qr_path", str(qr))
-    monkeypatch.setattr(settings, "cs_group_qr_open_kfid", "wk1")
     async with respx.mock as mock:
         _mock_qy_token(mock)
         _mock_sync(mock, [_customer_msg("进群")])
